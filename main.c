@@ -1,43 +1,32 @@
 #include <stdio.h>
-#include <stdlib.h>
 #include <math.h>
+#include <complex.h>
 #include "mna_solver.h"
 
 // Diode parameters
-#define DIODE_IS 1e-12     // Saturation current (A)
-#define DIODE_N 1.0        // Ideality factor
-#define DIODE_MAX_EXP 700.0 // Max exponent to avoid overflow
-#define DIODE_MIN_EXP -300.0 // Min exponent for reverse bias
+#define DIODE_IS 1e-12  // Saturation current (A)
+#define DIODE_N 1.0     // Ideality factor
+#define DIODE_VT 0.02585 // Thermal voltage
 
-// Circuit parameters
-#define V_PEAK 10.0        // AC source peak voltage (V)
-#define FREQ 60.0          // AC source frequency (Hz)
-#define R_LOAD 1000.0      // Load resistance (Ω)
-#define C_FILTER 1e-3      // Filter capacitance (F)
-#define TOTAL_CYCLES 5     // Number of AC cycles to simulate
-#define NUM_POINTS 10000   // Number of simulation points
+void diode_func(MNASolver* solver, int comp_index,
+                double vd, double* current, double* conductance) {
+    // Improved diode model with reverse bias protection
+    const double I_s = DIODE_IS;
+    const double n = DIODE_N;
+    const double V_T = DIODE_VT;
 
-// Diode nonlinear function
-void diode_func(MNASolver* solver, int comp_index, double voltage,
-                double* current, double* conductance) {
-    (void)solver;         // Unused
-    (void)comp_index;     // Unused
-
-    double Vt = MNA_VT;   // Thermal voltage
-    double x = voltage / (DIODE_N * Vt);
-
-    // Clamp exponent to avoid numerical issues
-    if (x > DIODE_MAX_EXP) {
-        double exp_x = exp(DIODE_MAX_EXP);
-        *current = DIODE_IS * (exp_x - 1.0);
-        *conductance = DIODE_IS / (DIODE_N * Vt) * exp_x;
-    } else if (x < DIODE_MIN_EXP) {
-        *current = -DIODE_IS;
-        *conductance = DIODE_IS / (DIODE_N * Vt) * exp(DIODE_MIN_EXP);
+    if (vd < -3 * n * V_T) {
+        // Reverse bias approximation
+        *current = -I_s;
+        *conductance = MNA_MIN_CONDUCTANCE;
+    } else if (vd > 0.7) {
+        // Forward bias approximation
+        *current = I_s * exp(vd/(n*V_T));
+        *conductance = *current / (n*V_T);
     } else {
-        double exp_x = exp(x);
-        *current = DIODE_IS * (exp_x - 1.0);
-        *conductance = DIODE_IS / (DIODE_N * Vt) * exp_x;
+        // Full exponential model
+        *current = I_s * (exp(vd/(n*V_T)) - 1);
+        *conductance = I_s/(n*V_T) * exp(vd/(n*V_T));
     }
 }
 
@@ -45,77 +34,54 @@ int main() {
     MNASolver solver;
     mna_init(&solver);
 
-    // Add components to the circuit
-    // AC Voltage Source (between nodes 1 and 2)
-    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, 1, 2, 0.0);
+    // Create circuit:
+    // DC Source (1V) + AC Source (1V) -> Resistor (1k) -> Diode -> Ground
+    // Nodes: 0=Ground, 1=Source, 2=DiodeAnode
 
-    // Diode Bridge (D1-D4)
-    mna_add_custom_nonlinear(&solver, 1, 3, diode_func, NULL, 0.0); // D1: anode=1, cathode=3
-    mna_add_custom_nonlinear(&solver, 2, 3, diode_func, NULL, 0.0); // D2: anode=2, cathode=3
-    mna_add_custom_nonlinear(&solver, 0, 1, diode_func, NULL, 0.0); // D3: anode=0 (GND), cathode=1
-    mna_add_custom_nonlinear(&solver, 0, 2, diode_func, NULL, 0.0); // D4: anode=0 (GND), cathode=2
+    // Add components
+    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, 0, 1, 1.0);  // DC=1V
+    mna_add_component(&solver, MNA_RESISTOR, 1, 2, 1000);       // 1k resistor
+    int diode_idx = solver.num_components;  // Store diode index
+    mna_add_custom_nonlinear(&solver, 2, 0, diode_func, NULL, 0.0);  // Better initial guess
 
-    // Load Resistor (between node 3 and GND)
-    mna_add_component(&solver, MNA_RESISTOR, 3, 0, R_LOAD);
+    // Configure AC source (1V magnitude, 0° phase)
+    mna_set_ac_source(&solver, 0, 1.0, 0.0);
 
-    // Filter Capacitor (between node 3 and GND)
-    mna_add_component(&solver, MNA_CAPACITOR, 3, 0, C_FILTER);
+    // Solve DC operating point
+    printf("Solving DC operating point...\n");
+    int dc_success = mna_solve_dc(&solver);
 
-    // Initialize transient analysis
-    mna_init_transient(&solver);
+    // Print DC results
+    printf("\nDC Solution %s:\n", dc_success ? "SUCCESS" : "FAILED");
+    printf("Node 1 (Source) Voltage: %.3f V\n", mna_get_node_voltage(&solver, 1));
+    printf("Node 2 (Diode Anode) Voltage: %.3f V\n", mna_get_node_voltage(&solver, 2));
 
-    // Open CSV file for writing results
-    FILE *fp = fopen("rectifier.csv", "w");
-    if (!fp) {
-        fprintf(stderr, "Error opening file.\n");
-        return 1;
-    }
-    fprintf(fp, "time,V1,V2,V3,I_R,I_C,I_D1,I_D2,I_D3,I_D4\n");
+    // Calculate actual diode current
+    double vd = solver.components[diode_idx].last_voltage;
+    double diode_current, diode_cond;
+    diode_func(&solver, diode_idx, vd, &diode_current, &diode_cond);
+    printf("Diode Voltage: %.3f V\n", vd);
+    printf("Diode Current: %.3f mA\n", diode_current * 1000);
+    printf("Diode Conductance: %.3f S\n\n", diode_cond);
 
-    // Simulation parameters
-    double total_time = TOTAL_CYCLES / FREQ;
-    double dt = total_time / NUM_POINTS;
-    double t = 0.0;
-    double V3_prev = 0.0; // Previous capacitor voltage (for current calculation)
+    // Perform AC analysis at different frequencies
+    double frequencies[] = {10, 100, 1000, 10000, 100000};
+    int num_freqs = sizeof(frequencies)/sizeof(frequencies[0]);
 
-    // Run transient simulation
-    for (int step = 0; step < NUM_POINTS; step++) {
-        // Update AC source: V = V_peak * sin(2*pi*f*t)
-        solver.components[0].value = V_PEAK * sin(2 * M_PI * FREQ * t);
+    printf("AC Analysis Results (Magnitude at Node 2):\n");
+    printf("Frequency(Hz)\t|Vout|(V)\tPhase(°)\n");
+    printf("----------------------------------------\n");
 
-        // Solve one time step
-        if (!mna_solve_transient_step(&solver, dt)) {
-            fprintf(stderr, "Solver failed at step %d\n", step);
-            break;
-        }
+    for (int i = 0; i < num_freqs; i++) {
+        double freq = frequencies[i];
+        mna_solve_ac(&solver, freq);
 
-        // Get node voltages
-        double V1 = mna_get_node_voltage(&solver, 1);
-        double V2 = mna_get_node_voltage(&solver, 2);
-        double V3 = mna_get_node_voltage(&solver, 3);
+        double complex v_out = mna_get_ac_node_voltage(&solver, 2);
+        double magnitude = cabs(v_out);
+        double phase = carg(v_out) * 180 / M_PI;
 
-        // Calculate load resistor current (Ohm's Law)
-        double I_R = V3 / R_LOAD;
-
-        // Calculate capacitor current: I_C = C * dV/dt ≈ C * (V3 - V3_prev)/dt
-        double I_C = C_FILTER * (V3 - V3_prev) / dt;
-        V3_prev = V3; // Update for next step
-
-        // Calculate diode currents using diode function
-        double I_D1, I_D2, I_D3, I_D4, g_dummy;
-        diode_func(&solver, 0, V1 - V3, &I_D1, &g_dummy); // D1: V1-V3
-        diode_func(&solver, 0, V2 - V3, &I_D2, &g_dummy); // D2: V2-V3
-        diode_func(&solver, 0, -V1, &I_D3, &g_dummy);     // D3: -V1
-        diode_func(&solver, 0, -V2, &I_D4, &g_dummy);     // D4: -V2
-
-        // Write results to CSV
-        fprintf(fp, "%.6f,%.6f,%.6f,%.6f,%.6e,%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                t, V1, V2, V3, I_R, I_C, I_D1, I_D2, I_D3, I_D4);
-
-        t += dt; // Advance time
+        printf("%.0f\t\t%.6f\t\t%.1f\n", freq, magnitude, phase);
     }
 
-    fclose(fp);
-    printf("Simulation completed. Results saved to rectifier.csv\n");
     return 0;
 }
