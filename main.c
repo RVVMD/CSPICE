@@ -31,7 +31,7 @@ int main() {
     // Create circuit: V1 -- R1 -- D1 -- GND
     mna_add_component(&solver, MNA_VOLTAGE_SOURCE, 0, 1, 0.0);  // V1
     mna_add_component(&solver, MNA_RESISTOR, 1, 2, 1000.0);     // R1 = 1kΩ
-    mna_add_custom_nonlinear(&solver, 0, 2, diode_model, NULL, 0.0);  // Diode
+    mna_add_custom_nonlinear(&solver, 2, 0, diode_model, NULL, 0.0);  // Diode
 
     FILE *csv = fopen("diode_sweep.csv", "w");
     fprintf(csv, "Vin,Vd,Id\n");
