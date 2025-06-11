@@ -18,10 +18,8 @@
 #define MNA_MAX_CONDUCTANCE 1e12
 #define MNA_MAX_MATRIX_SIZE (MNA_MAX_NODES + MNA_MAX_SOURCES)
 
-// Forward declaration of MNASolver
 typedef struct MNASolver MNASolver;
 
-// Define function pointer type first
 typedef void (*CustomNonlinearFunc)(MNASolver* solver, int comp_index,
                                   double voltage, double* current,
                                   double* conductance);
@@ -47,8 +45,7 @@ typedef struct {
     int is_nonlinear;
     double last_voltage;
     double last_current;
-
-    // Fields for custom nonlinear elements
+    double last_conductance;
     CustomNonlinearFunc nonlinear_func;
     void* user_data;
 } Component;
@@ -68,7 +65,6 @@ struct MNASolver {
     double complex ac_solution[MNA_MAX_NODES + MNA_MAX_SOURCES];
 };
 
-// Rest of the function prototypes remain the same
 void mna_init(MNASolver* solver);
 void mna_add_component(MNASolver* solver, ComponentType type, int node1, int node2, double value);
 void mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2,
@@ -89,7 +85,6 @@ double complex mna_get_ac_node_voltage(MNASolver* solver, int node);
 void mna_init_transient(MNASolver* solver);
 int mna_solve_transient_step(MNASolver* solver, double dt);
 
-// Implementation
 void mna_init(MNASolver* solver) {
     solver->num_nodes = 0;
     solver->num_components = 0;
@@ -219,11 +214,9 @@ void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index) {
     double current, conductance;
     comp->nonlinear_func(solver, comp_index, voltage, &current, &conductance);
 
-    // Ensure conductance stays within reasonable bounds
     if (conductance < MNA_MIN_CONDUCTANCE) conductance = MNA_MIN_CONDUCTANCE;
     if (conductance > MNA_MAX_CONDUCTANCE) conductance = MNA_MAX_CONDUCTANCE;
 
-    // Stamp the Norton equivalent
     mna_stamp_conductance(solver, n1, n2, conductance);
     mna_stamp_current_source(solver, n1, n2, (current - conductance * voltage));
 }
@@ -238,7 +231,7 @@ int mna_solve_linear_system(MNASolver* solver, int size) {
         }
 
         if (fabs(solver->A[max_row][pivot]) < MNA_MIN_CONDUCTANCE) {
-            return 0;  // Singular matrix
+            return 0;
         }
 
         if (max_row != pivot) {
@@ -279,7 +272,6 @@ int mna_solve_dc(MNASolver* solver) {
     int iteration = 0;
     double prev_voltages[MNA_MAX_NONLINEAR] = {0};
 
-    // Store initial nonlinear voltages for convergence tracking
     int nl_idx = 0;
     for (int i = 0; i < solver->num_components; i++) {
         if (solver->components[i].type == MNA_CUSTOM_NONLINEAR) {
@@ -292,7 +284,6 @@ int mna_solve_dc(MNASolver* solver) {
         int source_count = 0;
         int nonlinear_count = 0;
 
-        // Stamp all components
         for (int i = 0; i < solver->num_components; i++) {
             Component* comp = &solver->components[i];
             int n1 = comp->node1;
@@ -304,11 +295,9 @@ int mna_solve_dc(MNASolver* solver) {
                     break;
 
                 case MNA_CAPACITOR:
-                    // Open circuit for DC
                     break;
 
                 case MNA_INDUCTOR:
-                    // Small conductance approximation for DC short
                     mna_stamp_conductance(solver, n1, n2, MNA_MIN_CONDUCTANCE);
                     break;
 
@@ -335,12 +324,10 @@ int mna_solve_dc(MNASolver* solver) {
             }
         }
 
-        // Solve linear system
         if (!mna_solve_linear_system(solver, matrix_size)) {
-            return 0;  // Matrix solve failed
+            return 0;
         }
 
-        // Update nonlinear components and check convergence
         converged = 1;
         nl_idx = 0;
         for (int i = 0; i < solver->num_components; i++) {
@@ -349,29 +336,27 @@ int mna_solve_dc(MNASolver* solver) {
                 int n1 = comp->node1;
                 int n2 = comp->node2;
 
-                // Calculate new voltage
                 double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
                 double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
                 double new_voltage = v1 - v2;
-
-                // Calculate convergence criteria
                 double voltage_diff = fabs(new_voltage - comp->last_voltage);
                 double abs_tol = MNA_ABSTOL + MNA_RELTOL * fabs(new_voltage);
-
-                // Update component state
                 comp->last_voltage = new_voltage;
 
-                // Check if any nonlinear component hasn't converged
                 if (voltage_diff > abs_tol) {
                     converged = 0;
                 }
 
-                // Update previous voltages for damping
                 prev_voltages[nl_idx++] = new_voltage;
+
+                double current, conductance;
+                comp->nonlinear_func(solver, i, new_voltage, &current, &conductance);
+                if (conductance < MNA_MIN_CONDUCTANCE) conductance = MNA_MIN_CONDUCTANCE;
+                if (conductance > MNA_MAX_CONDUCTANCE) conductance = MNA_MAX_CONDUCTANCE;
+                comp->last_conductance = conductance;
             }
         }
 
-        // Handle cases with no nonlinear components
         if (nonlinear_count == 0) {
             converged = 1;
         }
@@ -386,20 +371,17 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
     double omega = 2 * M_PI * frequency;
     int matrix_size = solver->max_node_index + solver->num_sources;
 
-    // Check if matrix size is within limits
     if (matrix_size > MNA_MAX_MATRIX_SIZE) {
         printf("Matrix size too large for AC analysis\n");
         return;
     }
 
-    // Initialize complex matrix and vector
     double complex A_complex[MNA_MAX_MATRIX_SIZE][MNA_MAX_MATRIX_SIZE] = {{0}};
     double complex b_complex[MNA_MAX_MATRIX_SIZE] = {0};
     double complex x_complex[MNA_MAX_MATRIX_SIZE] = {0};
 
-    int source_count = 0;  // For indexing voltage sources
+    int source_count = 0;
 
-    // Stamp components into complex matrix
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
@@ -408,7 +390,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
 
         switch (comp->type) {
             case MNA_RESISTOR:
-                // Stamp conductance (real part)
                 admittance = 1.0 / comp->value;
                 if (n1 > 0) A_complex[n1-1][n1-1] += admittance;
                 if (n2 > 0) A_complex[n2-1][n2-1] += admittance;
@@ -419,7 +400,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
                 break;
 
             case MNA_CAPACITOR:
-                // Stamp capacitive admittance (imaginary part)
                 admittance = _Complex_I * omega * comp->value;
                 if (n1 > 0) A_complex[n1-1][n1-1] += admittance;
                 if (n2 > 0) A_complex[n2-1][n2-1] += admittance;
@@ -430,7 +410,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
                 break;
 
             case MNA_INDUCTOR:
-                // Stamp inductive admittance (imaginary part)
                 if (omega == 0) {
                     admittance = 1.0 / MNA_MIN_CONDUCTANCE;
                 } else {
@@ -445,11 +424,9 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
                 break;
 
             case MNA_VOLTAGE_SOURCE: {
-                // Convert to complex AC value
                 double complex voltage = comp->ac_magnitude * (cos(comp->ac_phase) + _Complex_I * sin(comp->ac_phase));
                 int v_index = solver->max_node_index + source_count;
 
-                // Stamp voltage source constraints
                 if (n1 > 0) {
                     A_complex[n1-1][v_index] = 1.0;
                     A_complex[v_index][n1-1] = 1.0;
@@ -464,19 +441,24 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
             }
 
             case MNA_CURRENT_SOURCE: {
-                // Convert to complex AC value
                 double complex current = comp->ac_magnitude * (cos(comp->ac_phase) + _Complex_I * sin(comp->ac_phase));
                 if (n1 > 0) b_complex[n1-1] -= current;
                 if (n2 > 0) b_complex[n2-1] += current;
                 break;
             }
 
-            case MNA_CUSTOM_NONLINEAR:
-                // Skip nonlinear elements in AC analysis for now
+            case MNA_CUSTOM_NONLINEAR: {
+                double g = comp->last_conductance;
+                if (n1 > 0) A_complex[n1-1][n1-1] += g;
+                if (n2 > 0) A_complex[n2-1][n2-1] += g;
+                if (n1 > 0 && n2 > 0) {
+                    A_complex[n1-1][n2-1] -= g;
+                    A_complex[n2-1][n1-1] -= g;
+                }
                 break;
+            }
 
             case MNA_SWITCH: {
-                // Use conductance based on switch state
                 double g = comp->state ?
                     1.0 / comp->value :
                     MNA_MIN_CONDUCTANCE;
@@ -492,10 +474,8 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
         }
     }
 
-    // Solve complex linear system with Gaussian elimination
     int success = 1;
     for (int k = 0; k < matrix_size; k++) {
-        // Find pivot
         int max_row = k;
         double max_mag = cabs(A_complex[k][k]);
         for (int i = k+1; i < matrix_size; i++) {
@@ -511,7 +491,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
             break;
         }
 
-        // Swap rows
         if (max_row != k) {
             for (int j = k; j < matrix_size; j++) {
                 double complex temp = A_complex[k][j];
@@ -523,7 +502,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
             b_complex[max_row] = temp;
         }
 
-        // Eliminate
         for (int i = k+1; i < matrix_size; i++) {
             double complex factor = A_complex[i][k] / A_complex[k][k];
             for (int j = k; j < matrix_size; j++) {
@@ -538,7 +516,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
         return;
     }
 
-    // Back substitution
     for (int i = matrix_size-1; i >= 0; i--) {
         x_complex[i] = b_complex[i];
         for (int j = i+1; j < matrix_size; j++) {
@@ -547,7 +524,6 @@ void mna_solve_ac(MNASolver* solver, double frequency) {
         x_complex[i] /= A_complex[i][i];
     }
 
-    // Store results
     for (int i = 0; i < matrix_size; i++) {
         solver->ac_solution[i] = x_complex[i];
     }
@@ -557,8 +533,8 @@ void mna_init_transient(MNASolver* solver) {
     solver->time = 0.0;
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
-        comp->last_voltage = 0.0;  // Reset capacitor voltages
-        comp->last_current = 0.0;  // Reset inductor currents
+        comp->last_voltage = 0.0;
+        comp->last_current = 0.0;
     }
 }
 
@@ -567,7 +543,6 @@ int mna_solve_transient_step(MNASolver* solver, double dt) {
     mna_reset_system(solver);
     int source_count = 0;
 
-    // Stamp components
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
@@ -621,12 +596,10 @@ int mna_solve_transient_step(MNASolver* solver, double dt) {
         }
     }
 
-    // Solve the system
     if (!mna_solve_linear_system(solver, matrix_size)) {
-        return 0;  // Matrix solve failed
+        return 0;
     }
 
-    // Update component states
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
@@ -655,7 +628,7 @@ int mna_solve_transient_step(MNASolver* solver, double dt) {
 }
 
 double mna_get_node_voltage(MNASolver* solver, int node) {
-    if (node == 0) return 0.0;  // Ground
+    if (node == 0) return 0.0;
     if (node > 0 && node <= solver->max_node_index) {
         return solver->x[node-1];
     }
