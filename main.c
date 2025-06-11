@@ -1,78 +1,67 @@
 #include <stdio.h>
 #include <stdlib.h>
-#include "cspice.h"
+#include <math.h>
+#include "mna_solver.h"
 
-void print_results(double t, double *node_voltages) {
-    // Print time, input AC voltage, and DC output voltage
-    printf("%.6f, %.6f, %.6f\n", t, node_voltages[1], node_voltages[2]);
+#define DIODE_IS 1e-14   // More realistic saturation current
+#define DIODE_N   1.7    // Typical emission coefficient
+
+void diode_model(MNASolver* solver, int comp_index,
+                 double vd, double* Ic, double* G) {
+    // Use the global VT constant from MNA solver
+    double vt = MNA_VT * DIODE_N;
+
+    double exponent = vd / vt;
+    // Clamp exponent to avoid overflow
+    exponent = (exponent > 700) ? 700 : (exponent < -700) ? -700 : exponent;
+
+    *Ic = DIODE_IS * (exp(exponent) - 1.0);
+    *G = DIODE_IS / vt * exp(exponent);
+
+    // Clamp conductance to valid range
+    *G = (*G < MNA_MIN_CONDUCTANCE) ? MNA_MIN_CONDUCTANCE :
+         (*G > MNA_MAX_CONDUCTANCE) ? MNA_MAX_CONDUCTANCE : *G;
 }
 
 int main() {
-    // Initialize circuit with proper parameters
-    Circuit circuit;
-    const double rel_tol = 1e-6;       // Relative tolerance
-    const double abs_tol = 1e-9;       // Absolute tolerance
-    const int max_iter = 100;          // Maximum Newton iterations
-    const int init_comp_cap = 16;      // Initial component capacity
-    const int init_node_cap = 8;       // Initial node capacity
+    MNASolver solver;
+    mna_init(&solver);
+    double last_vd = 0.0;  // Declare and initialize here
 
-    init_circuit(&circuit, rel_tol, abs_tol, max_iter, init_comp_cap, init_node_cap);
+    // Create circuit: V1 -- R1 -- D1 -- GND
+    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, 0, 1, 0.0);  // V1
+    mna_add_component(&solver, MNA_RESISTOR, 1, 2, 1000.0);     // R1 = 1kΩ
+    mna_add_custom_nonlinear(&solver, 0, 2, diode_model, NULL, 0.0);  // Diode
 
-    // Set simulation parameters
-    const double time_step = 10e-6;    // 10μs time step for 60Hz signal
-    set_fixed_time_step(&circuit, time_step);
+    FILE *csv = fopen("diode_sweep.csv", "w");
+    fprintf(csv, "Vin,Vd,Id\n");
 
-    // Circuit parameters
-    const double ac_amplitude = 10.0;  // 10V peak (20V peak-to-peak)
-    const double ac_frequency = 60.0;  // 60Hz
-    const double cap_value = 100e-6;   // 100μF smoothing capacitor
-    const double load_resistance = 1000.0; // 1kΩ load
+    const int points = 100;
+    for (int i = 0; i <= points; i++) {
+        double vin = 5.0 * i / points;  // 0-1V sweep
 
-    // Diode parameters (1N4007-like)
-    const double diode_Is = 1e-14;     // Saturation current
-    const double diode_N = 1.6;        // Emission coefficient
+        // Reset solver system
+        mna_reset_system(&solver);
+        solver.components[0].value = vin;
 
-    // Create full-wave bridge rectifier circuit
-    // Nodes: 0=GND, 1=AC input, 2=Output, 3-6=bridge internal nodes
+        // Start from last solution (except first iteration)
+        if (i > 0) {
+            solver.components[2].last_voltage = last_vd;
+        }
 
-    // AC voltage source (10V peak, 60Hz, 0V DC offset)
-    double ac_params[] = {0.0, ac_amplitude, ac_frequency, 0.0}; // DC, Ampl, Freq, Phase
-    if (!add_voltage_source(&circuit, "VAC", 1, 0, SINE_SOURCE, ac_params)) {
-        fprintf(stderr, "Failed to add AC voltage source\n");
-        free_circuit(&circuit);
-        return EXIT_FAILURE;
+        if (mna_solve_dc(&solver)) {
+            double vd = solver.components[2].last_voltage;
+            last_vd = vd;  // Store for next iteration
+
+            double id = 0;
+            double g = 0;
+            diode_model(&solver, 2, vd, &id, &g);
+            fprintf(csv, "%.6f,%.6f,%.6e\n", vin, vd, id);
+        } else {
+            fprintf(csv, "%.6f,nan,nan\n", vin);
+        }
     }
 
-    // Diode bridge (D1-D4)
-    if (!add_diode(&circuit, "D1", 1, 3, diode_Is, diode_N) ||  // AC+ to bridge top
-        !add_diode(&circuit, "D2", 4, 1, diode_Is, diode_N) ||  // AC- to bridge bottom
-        !add_diode(&circuit, "D3", 2, 4, diode_Is, diode_N) ||  // Output to bridge bottom
-        !add_diode(&circuit, "D4", 3, 2, diode_Is, diode_N)) {  // Bridge top to output
-        fprintf(stderr, "Failed to add diodes\n");
-        free_circuit(&circuit);
-        return EXIT_FAILURE;
-    }
-
-    // Load resistor
-    if (!add_resistor(&circuit, "Rload", 2, 0, load_resistance)) {
-        fprintf(stderr, "Failed to add load resistor\n");
-        free_circuit(&circuit);
-        return EXIT_FAILURE;
-    }
-
-    // Smoothing capacitor (initial voltage = 0V)
-    if (!add_capacitor(&circuit, "Cfilter", 2, 0, cap_value, 0.0)) {
-        fprintf(stderr, "Failed to add filter capacitor\n");
-        free_circuit(&circuit);
-        return EXIT_FAILURE;
-    }
-
-    // Run transient analysis for 5 AC cycles (~83.33ms)
-    const double simulation_time = 5.0 / ac_frequency; // 5 cycles
-    printf("Time (s), AC Input (V), DC Output (V)\n");
-    transient_analysis(&circuit, simulation_time, print_results);
-
-    // Clean up
-    free_circuit(&circuit);
-    return EXIT_SUCCESS;
+    fclose(csv);
+    return 0;
 }
