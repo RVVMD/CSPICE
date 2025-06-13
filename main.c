@@ -1,87 +1,132 @@
 #include <stdio.h>
 #include <math.h>
-#include <complex.h>
 #include "mna_solver.h"
 
-// Diode parameters
-#define DIODE_IS 1e-12  // Saturation current (A)
-#define DIODE_N 1.0     // Ideality factor
-#define DIODE_VT 0.02585 // Thermal voltage
+// Nonlinear element wrappers with sign adjustments
+void nonlinear_wrapper1(MNASolver* solver, int comp_index, double voltage, double current,
+                        double* value1, double* value2, NonlinearType nl_type) {
+    double V_physical = voltage;
+    double In = 0.316 * (1 - exp(-0.0995 * V_physical));
+    double g_physical = 0.316 * 0.0995 * exp(-0.0995 * V_physical);
+    *value1 = In;
+    *value2 = g_physical;
+}
 
-void diode_func(MNASolver* solver, int comp_index,
-                double vd, double* current, double* conductance) {
-    // Improved diode model with reverse bias protection
-    const double I_s = DIODE_IS;
-    const double n = DIODE_N;
-    const double V_T = DIODE_VT;
+void nonlinear_wrapper2(MNASolver* solver, int comp_index, double voltage, double current,
+                        double* value1, double* value2, NonlinearType nl_type) {
+    double In = 0.025 * (exp(0.085 * voltage) - 0.025);
+    double g = 0.025 * 0.085 * exp(0.085 * voltage);
+    *value1 = In;
+    *value2 = g;
+}
 
-    if (vd < -3 * n * V_T) {
-        // Reverse bias approximation
-        *current = -I_s;
-        *conductance = MNA_MIN_CONDUCTANCE;
-    } else if (vd > 0.7) {
-        // Forward bias approximation
-        *current = I_s * exp(vd/(n*V_T));
-        *conductance = *current / (n*V_T);
-    } else {
-        // Full exponential model
-        *current = I_s * (exp(vd/(n*V_T)) - 1);
-        *conductance = I_s/(n*V_T) * exp(vd/(n*V_T));
-    }
+void nonlinear_wrapper3(MNASolver* solver, int comp_index, double voltage, double current,
+                        double* value1, double* value2, NonlinearType nl_type) {
+    double In = 0.02467 * voltage - 0.001 * pow(voltage, 2) + 0.00001333 * pow(voltage, 3);
+    double g = 0.02467 - 0.002 * voltage + 0.00003999 * pow(voltage, 2);
+    *value1 = In;
+    *value2 = g;
 }
 
 int main() {
     MNASolver solver;
     mna_init(&solver);
 
-    // Create circuit:
-    // DC Source (1V) + AC Source (1V) -> Resistor (1k) -> Diode -> Ground
-    // Nodes: 0=Ground, 1=Source, 2=DiodeAnode
+    // Create intermediate nodes (2,3,4) for voltage sources
+    int node_a = 1;  // Main node a
+    int node_b = 0;  // Ground (node b)
+    int node2 = 2;   // Between E1 and NE1
+    int node3 = 3;   // Between E2 and NE2
+    int node4 = 4;   // Between E3 and NE3
 
-    // Add components
-    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, 0, 1, 1.0);  // DC=1V
-    mna_add_component(&solver, MNA_RESISTOR, 1, 2, 1000);       // 1k resistor
-    int diode_idx = solver.num_components;  // Store diode index
-    mna_add_custom_nonlinear(&solver, 2, 0, diode_func, NULL, 0.0);  // Better initial guess
+    // Add components to the circuit
+    // Branch 1: E1 (10V) and NE1
+    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, node_b, node2, 10.0);
+    mna_add_custom_nonlinear(&solver, node_a, node2, NONLINEAR_RESISTOR,
+                             nonlinear_wrapper1, NULL, 0.0, 0.0);
 
-    // Configure AC source (1V magnitude, 0° phase)
-    mna_set_ac_source(&solver, 0, 1.0, 0.0);
+    // Branch 2: E2 (10V) and NE2
+    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, node3, node_b, 10.0);
+    mna_add_custom_nonlinear(&solver, node_a, node3, NONLINEAR_RESISTOR,
+                             nonlinear_wrapper2, NULL, 0.0, 0.0);
+
+    // Branch 3: E3 (40V) and NE3
+    mna_add_component(&solver, MNA_VOLTAGE_SOURCE, node_b, node4, 40.0);
+    mna_add_custom_nonlinear(&solver, node_a, node4, NONLINEAR_RESISTOR,
+                             nonlinear_wrapper3, NULL, 0.0, 0.0);
 
     // Solve DC operating point
-    printf("Solving DC operating point...\n");
-    int dc_success = mna_solve_dc(&solver);
+    if (mna_solve_dc(&solver)) {
+        printf("\nDC Solution Converged:\n");
+        printf("---------------------------------\n");
 
-    // Print DC results
-    printf("\nDC Solution %s:\n", dc_success ? "SUCCESS" : "FAILED");
-    printf("Node 1 (Source) Voltage: %.3f V\n", mna_get_node_voltage(&solver, 1));
-    printf("Node 2 (Diode Anode) Voltage: %.3f V\n", mna_get_node_voltage(&solver, 2));
+        // Print node voltages
+        printf("Node Voltages:\n");
+        printf("Ua (node 1) = %.6f V\n", mna_get_node_voltage(&solver, node_a));
+        printf("U2 (node 2) = %.6f V\n", mna_get_node_voltage(&solver, node2));
+        printf("U3 (node 3) = %.6f V\n", mna_get_node_voltage(&solver, node3));
+        printf("U4 (node 4) = %.6f V\n", mna_get_node_voltage(&solver, node4));
 
-    // Calculate actual diode current
-    double vd = solver.components[diode_idx].last_voltage;
-    double diode_current, diode_cond;
-    diode_func(&solver, diode_idx, vd, &diode_current, &diode_cond);
-    printf("Diode Voltage: %.3f V\n", vd);
-    printf("Diode Current: %.3f mA\n", diode_current * 1000);
-    printf("Diode Conductance: %.3f S\n\n", diode_cond);
+        // Print branch currents
+        printf("\nBranch Currents:\n");
+        int ne_count = 0;
+        for (int i = 0; i < solver.num_components; i++) {
+            Component* comp = &solver.components[i];
+            if (comp->type == MNA_CUSTOM_NONLINEAR) {
+                double current, conductance;
+                comp->nonlinear_func(&solver, i, comp->last_voltage, 0,
+                                    &current, &conductance, comp->nonlinear_type);
+                printf("I_NE%d = %.6f A\n", ne_count + 1, current);
+                ne_count++;
+            }
+        }
 
-    // Perform AC analysis at different frequencies
-    double frequencies[] = {10, 100, 1000, 10000, 100000};
-    int num_freqs = sizeof(frequencies)/sizeof(frequencies[0]);
+        // Calculate and print voltage source currents
+        printf("\nVoltage Source Currents:\n");
+        int vs_count = 0;
+        for (int i = 0; i < solver.num_components; i++) {
+            if (solver.components[i].type == MNA_VOLTAGE_SOURCE) {
+                int idx = solver.max_node_index + vs_count;
+                printf("I_E%d = %.6f A\n", vs_count + 1, solver.x[idx]);
+                vs_count++;
+            }
+        }
 
-    printf("AC Analysis Results (Magnitude at Node 2):\n");
-    printf("Frequency(Hz)\t|Vout|(V)\tPhase(°)\n");
-    printf("----------------------------------------\n");
-
-    for (int i = 0; i < num_freqs; i++) {
-        double freq = frequencies[i];
-        mna_solve_ac(&solver, freq);
-
-        double complex v_out = mna_get_ac_node_voltage(&solver, 2);
-        double magnitude = cabs(v_out);
-        double phase = carg(v_out) * 180 / M_PI;
-
-        printf("%.0f\t\t%.6f\t\t%.1f\n", freq, magnitude, phase);
+        printf("---------------------------------\n");
+    } else {
+        printf("DC Solution Failed to Converge\n");
     }
 
+    // After solving DC:
+    double total_source_power = 0;
+    double total_resistor_power = 0;
+
+    // Calculate source powers
+    int vs_count = 0;
+    for (int i = 0; i < solver.num_components; i++) {
+        if (solver.components[i].type == MNA_VOLTAGE_SOURCE) {
+            int idx = solver.max_node_index + vs_count;
+            double Is = solver.x[idx];
+            double V = solver.components[i].value;
+            double P = V * Is;
+            total_source_power += P;
+            vs_count++;
+        }
+    }
+
+    // Calculate resistor powers
+    for (int i = 0; i < solver.num_components; i++) {
+        Component* comp = &solver.components[i];
+        if (comp->type == MNA_CUSTOM_NONLINEAR) {
+            double Ir, G;
+            comp->nonlinear_func(&solver, i, comp->last_voltage, 0, &Ir, &G, comp->nonlinear_type);
+            double P = comp->last_voltage * Ir;
+            total_resistor_power += P;
+        }
+    }
+
+    printf("Total source power: %.6f W\n", total_source_power);
+    printf("Total resistor power: %.6f W\n", total_resistor_power);
+    printf("Power balance: %.6f W\n", total_source_power + total_resistor_power);
     return 0;
 }
