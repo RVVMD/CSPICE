@@ -237,12 +237,12 @@ void mna_stamp_voltage_source(MNASolver* solver, int comp_index, int source_idx)
     int n2 = vs->node2;
 
     if (n1 > 0) {
-        solver->A[n1-1][v_index] = -1.0;
-        solver->A[v_index][n1-1] = -1.0;
+        solver->A[n1-1][v_index] = 1.0;
+        solver->A[v_index][n1-1] = 1.0;
     }
     if (n2 > 0) {
-        solver->A[n2-1][v_index] = 1.0;
-        solver->A[v_index][n2-1] = 1.0;
+        solver->A[n2-1][v_index] = -1.0;
+        solver->A[v_index][n2-1] = -1.0;
     }
 
     solver->b[v_index] = vs->value;
