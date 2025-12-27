@@ -2,370 +2,299 @@
 #include <stdio.h>
 #include <math.h>
 #include <stdlib.h>
-#include <time.h>
 
-// Custom nonlinear comparator with hysteresis (Schmitt trigger)
-void schmitt_trigger_stamp(MNASolver* solver,
-                          const int* nodes,
-                          int num_nodes,
-                          void* user_data,
-                          double time,
-                          double dt) {
-    if (num_nodes < 3) return; // Need at least in+, in-, out
+// Forward declaration of the ideal op-amp stamping function
+void ideal_opamp_stamp(MNASolver* solver,
+                      const int* nodes,
+                      int num_nodes,
+                      void* user_data,
+                      double time,
+                      double dt);
 
-    int in_plus = nodes[0];   // Non-inverting input
-    int in_minus = nodes[1];  // Inverting input (threshold)
-    int output = nodes[2];    // Output
+// Simple voltage-controlled voltage source (VCVS) as a 4-terminal element
+void vcvs_stamp(MNASolver* solver,
+                const int* nodes,
+                int num_nodes,
+                void* user_data,
+                double time,
+                double dt) {
+    if (num_nodes < 4) return;
 
-    double* thresholds = (double*)user_data;
-    double upper_thresh = thresholds[0];
-    double lower_thresh = thresholds[1];
-    double output_high = thresholds[2];
-    double output_low = thresholds[3];
+    int in_plus = nodes[0];   // Input non-inverting
+    int in_minus = nodes[1];  // Input inverting
+    int out_plus = nodes[2];  // Output positive
+    int out_minus = nodes[3]; // Output negative (usually ground)
 
-    // Get current output state (use last_value as state memory)
-    double current_out = (output > 0 && solver->x) ? solver->x[output-1] : 0.0;
-    int state = (current_out > (output_high + output_low) / 2) ? 1 : 0;
+    double gain = *((double*)user_data);
 
-    // Get input voltages
-    double v_plus = (in_plus > 0) ? solver->x[in_plus-1] : 0.0;
-    double v_minus = (in_minus > 0) ? solver->x[in_minus-1] : 0.0;
+    // Add equation for Vout = gain * (Vin+ - Vin-)
+    if (out_plus > 0) {
+        // Output node equation
+        MAT(solver, out_plus-1, out_plus-1) += 1.0;
 
-    // Determine next state based on hysteresis
-    // For the matrix stamping, we use a large gain to approximate the switching behavior
-    const double gain = 1e6;
+        if (in_plus > 0) MAT(solver, out_plus-1, in_plus-1) -= gain;
+        if (in_minus > 0) MAT(solver, out_plus-1, in_minus-1) += gain;
 
-    if (output > 0) {
-        if (state == 1) {
-            // Currently high - switch when input goes below lower threshold
-            if (v_plus < lower_thresh) {
-                state = 0;
-            }
-            MAT(solver, output-1, output-1) = 1.0;
-            if (in_plus > 0) MAT(solver, output-1, in_plus-1) = -gain;
-            solver->b[output-1] = -gain * lower_thresh;
-        } else {
-            // Currently low - switch when input goes above upper threshold
-            if (v_plus > upper_thresh) {
-                state = 1;
-            }
-            MAT(solver, output-1, output-1) = 1.0;
-            if (in_plus > 0) MAT(solver, output-1, in_plus-1) = -gain;
-            solver->b[output-1] = -gain * upper_thresh;
-        }
+        // Add small conductance for numerical stability
+        MAT(solver, out_plus-1, out_plus-1) += 1e-9;
     }
 
-    // Add small conductances to prevent floating nodes
+    // Add small conductances to input nodes to prevent floating
     if (in_plus > 0) MAT(solver, in_plus-1, in_plus-1) += 1e-12;
     if (in_minus > 0) MAT(solver, in_minus-1, in_minus-1) += 1e-12;
-    if (output > 0) MAT(solver, output-1, output-1) += 1e-9;
 }
 
-// 555 Timer Model as a custom n-pole element (8-pin package)
-// Pins: 1-GND, 2-TRIG, 3-OUT, 4-RESET, 5-CTRL, 6-THRES, 7-DISCH, 8-VCC
-void timer_555_stamp(MNASolver* solver,
-                    const int* nodes,
-                    int num_nodes,
-                    void* user_data,
-                    double time,
-                    double dt) {
-    if (num_nodes < 8) return;
-
-    int gnd = nodes[0];      // Pin 1 - Ground
-    int trig = nodes[1];     // Pin 2 - Trigger
-    int out = nodes[2];      // Pin 3 - Output
-    int reset = nodes[3];    // Pin 4 - Reset (active low)
-    int ctrl = nodes[4];     // Pin 5 - Control voltage
-    int thres = nodes[5];    // Pin 6 - Threshold
-    int disch = nodes[6];    // Pin 7 - Discharge
-    int vcc = nodes[7];      // Pin 8 - VCC
-
-    double vcc_voltage = 5.0; // Standard 5V supply
-
-    // Internal thresholds (2/3 Vcc and 1/3 Vcc, or based on ctrl pin)
-    double threshold_upper = (ctrl > 0 && solver->x) ?
-                            solver->x[ctrl-1] : (2.0/3.0) * vcc_voltage;
-    double threshold_lower = threshold_upper / 2.0;
-
-    // Get current voltages
-    double v_trig = (trig > 0 && solver->x) ? solver->x[trig-1] : 0.0;
-    double v_thres = (thres > 0 && solver->x) ? solver->x[thres-1] : 0.0;
-    double v_reset = (reset > 0 && solver->x) ? solver->x[reset-1] : vcc_voltage; // Active low
-
-    // Internal flip-flop state (approximation)
-    static int ff_state = 1; // Start with output high
-
-    // Flip-flop logic (simplified)
-    if (v_reset < 0.7) { // Reset active (below ~0.7V)
-        ff_state = 0;
-    } else {
-        if (v_trig < threshold_lower) {
-            ff_state = 1; // Set
-        }
-        if (v_thres > threshold_upper) {
-            ff_state = 0; // Reset
-        }
-    }
-
-    // Output stage (push-pull)
-    if (out > 0) {
-        if (ff_state == 1) {
-            // Output high (with small resistance for stability)
-            MAT(solver, out-1, out-1) += 1e3; // 1k conductance
-            solver->b[out-1] += 1e3 * vcc_voltage;
-        } else {
-            // Output low (connect to ground)
-            MAT(solver, out-1, out-1) += 1e3; // 1k conductance
-            solver->b[out-1] += 0.0;
-        }
-    }
-
-    // Discharge transistor (open collector)
-    if (disch > 0) {
-        if (ff_state == 0) {
-            // Discharge transistor ON (connect to ground)
-            MAT(solver, disch-1, disch-1) += 1e2; // 100 S (10mΩ)
-            solver->b[disch-1] += 0.0;
-        } else {
-            // Discharge transistor OFF (high impedance)
-            MAT(solver, disch-1, disch-1) += 1e-9; // Very small conductance
-        }
-    }
-
-    // Control pin input impedance
-    if (ctrl > 0) {
-        MAT(solver, ctrl-1, ctrl-1) += 1e-8; // 100MΩ input impedance
-    }
-
-    // Prevent floating nodes with small conductances
-    if (trig > 0) MAT(solver, trig-1, trig-1) += 1e-12;
-    if (thres > 0) MAT(solver, thres-1, thres-1) += 1e-12;
-    if (reset > 0) MAT(solver, reset-1, reset-1) += 1e-12;
-}
-
-// Phase-Locked Loop (PLL) test circuit with voltage-controlled oscillator
 int main() {
     MNASolver solver;
     MNAStatus status;
 
-    printf("Initializing MNA solver for complex PLL circuit...\n");
+    printf("== Multi-Domain Circuit Analysis Test ==\n");
+    printf("This program tests both DC and AC solvers on the same circuit\n\n");
+
+    printf("Initializing MNA solver...\n");
     status = mna_init(&solver);
     if (status != MNA_SUCCESS) {
         printf("Failed to initialize solver: %d\n", status);
         return 1;
     }
 
-    printf("Creating nodes for PLL circuit...\n");
-    int gnd = 0;             // Ground (node 0)
-    int vcc = mna_create_node(&solver);        // +5V power supply
-    int vdd = mna_create_node(&solver);        // +12V for VCO
+    printf("Creating nodes...\n");
+    int gnd = 0;            // Ground (node 0)
+    int vin = mna_create_node(&solver);       // Input voltage
+    int vout = mna_create_node(&solver);      // Output voltage
+    int op_in_plus = mna_create_node(&solver);
+    int op_in_minus = mna_create_node(&solver);
 
-    // Reference signal path
-    int ref_in = mna_create_node(&solver);     // Reference input
-    int phase_detector_out = mna_create_node(&solver);
+    printf("Adding components for an active low-pass filter...\n");
+    // Input voltage source (1V for DC, 1V magnitude for AC)
+    mna_add_voltage_source(&solver, vin, gnd, 1.0, NULL);
+    mna_set_ac_source(&solver, solver.num_components-1, 1.0, 0.0); // 1V magnitude, 0 phase
 
-    // VCO control and output
-    int vco_control = mna_create_node(&solver);
-    int vco_out = mna_create_node(&solver);
+    // Non-inverting amplifier with gain = 2
+    mna_add_resistor(&solver, op_in_minus, gnd, 1000.0, NULL); // R1 = 1k
+    mna_add_resistor(&solver, op_in_minus, vout, 1000.0, NULL); // R2 = 1k
 
-    // Filter nodes
-    int filter_node1 = mna_create_node(&solver);
-    int filter_node2 = mna_create_node(&solver);
+    // RC low-pass filter at input
+    mna_add_resistor(&solver, vin, op_in_plus, 1000.0, NULL); // R3 = 1k
+    mna_add_capacitor(&solver, op_in_plus, gnd, 1e-6, NULL);   // C1 = 1uF
 
-    // 555 Timer nodes (8 pins as described in timer_555_stamp)
-    int timer_gnd = gnd;                     // Pin 1 - Ground
-    int timer_trig = mna_create_node(&solver); // Pin 2 - Trigger
-    int timer_out = mna_create_node(&solver);  // Pin 3 - Output
-    int timer_reset = vcc;                   // Pin 4 - Reset (tied to VCC)
-    int timer_ctrl = mna_create_node(&solver); // Pin 5 - Control
-    int timer_thres = mna_create_node(&solver); // Pin 6 - Threshold
-    int timer_disch = mna_create_node(&solver); // Pin 7 - Discharge
-    int timer_vcc = vcc;                     // Pin 8 - VCC
-
-    // Schmitt trigger nodes
-    int schmitt_in_plus = mna_create_node(&solver);
-    int schmitt_in_minus = mna_create_node(&solver);
-    int schmitt_out = mna_create_node(&solver);
-
-    printf("Adding power supplies...\n");
-    mna_add_voltage_source(&solver, vcc, gnd, 5.0, NULL);   // 5V supply
-    mna_add_voltage_source(&solver, vdd, gnd, 12.0, NULL);  // 12V supply
-
-    printf("Adding reference signal source...\n");
-    // 1kHz square wave reference signal (we'll change it during simulation)
-    mna_add_voltage_source(&solver, ref_in, gnd, 0.0, NULL);
-
-    printf("Adding passive components...\n");
-    // Phase detector - simple XOR implementation with resistors
-    mna_add_resistor(&solver, ref_in, phase_detector_out, 10e3, NULL); // 10k
-    mna_add_resistor(&solver, vco_out, phase_detector_out, 10e3, NULL); // 10k
-
-    // Loop filter (active low-pass)
-    mna_add_resistor(&solver, phase_detector_out, filter_node1, 10e3, NULL); // 10k
-    mna_add_capacitor(&solver, filter_node1, gnd, 100e-9, NULL); // 100nF
-    mna_add_resistor(&solver, filter_node1, filter_node2, 1e3, NULL); // 1k
-    mna_add_capacitor(&solver, filter_node2, gnd, 1e-6, NULL); // 1uF
-
-    // VCO control components
-    mna_add_resistor(&solver, filter_node2, vco_control, 10e3, NULL); // 10k
-
-    // 555 Timer external components for VCO
-    mna_add_resistor(&solver, vcc, timer_disch, 10e3, NULL); // R1 = 10k
-    mna_add_resistor(&solver, timer_disch, timer_thres, 100e3, NULL); // R2 = 100k (variable)
-    mna_add_capacitor(&solver, timer_thres, gnd, 10e-9, NULL); // C = 10nF
-
-    // Connect 555 output to VCO output
-    mna_add_resistor(&solver, timer_out, vco_out, 100, NULL); // Small resistor for isolation
-
-    // Feedback divider (divide by 4)
-    mna_add_resistor(&solver, vco_out, schmitt_in_plus, 1e6, NULL); // High impedance buffer
-
-    // Configure Schmitt trigger thresholds (1/3 and 2/3 of VCC)
-    double thresholds[4] = {3.33, 1.67, 5.0, 0.0}; // Upper, lower, high output, low output
-
-    printf("Adding custom n-pole elements...\n");
-    // Add 555 timer as 8-terminal element
-    int timer_nodes[8] = {timer_gnd, timer_trig, timer_out, timer_reset,
-                         timer_ctrl, timer_thres, timer_disch, timer_vcc};
-    status = mna_add_custom_n_pole(&solver, timer_nodes, 8, timer_555_stamp, NULL, NULL);
+    // Add custom op-amp (ideal) as 3-terminal element
+    double gain = 1e6;
+    int opamp_nodes[3] = {op_in_plus, op_in_minus, vout};
+    status = mna_add_custom_n_pole(&solver, opamp_nodes, 3, ideal_opamp_stamp, &gain, NULL);
     if (status != MNA_SUCCESS) {
-        printf("Failed to add 555 timer: %d\n", status);
+        printf("Failed to add op-amp: %d\n", status);
         mna_destroy(&solver);
         return 1;
     }
 
-    // Add Schmitt trigger as comparator for frequency division
-    int schmitt_nodes[3] = {schmitt_in_plus, schmitt_in_minus, schmitt_out};
-    status = mna_add_custom_n_pole(&solver, schmitt_nodes, 3, schmitt_trigger_stamp, thresholds, NULL);
+    printf("\n=== DC Analysis ===\n");
+    printf("Solving DC operating point...\n");
+    status = mna_solve_dc(&solver);
     if (status != MNA_SUCCESS) {
-        printf("Failed to add Schmitt trigger: %d\n", status);
-        mna_destroy(&solver);
-        return 1;
-    }
+        printf("DC solve failed: %d\n", status);
+    } else {
+        double v_in = mna_get_node_voltage(&solver, vin);
+        double v_out = mna_get_node_voltage(&solver, vout);
+        double v_plus = mna_get_node_voltage(&solver, op_in_plus);
+        double v_minus = mna_get_node_voltage(&solver, op_in_minus);
 
-    // Connect Schmitt trigger reference voltage (midpoint)
-    mna_add_voltage_source(&solver, schmitt_in_minus, gnd, 2.5, NULL); // 2.5V reference
+        printf("DC Results:\n");
+        printf("  Input voltage (Vin):  %.6f V\n", v_in);
+        printf("  Output voltage (Vout): %.6f V\n", v_out);
+        printf("  Op-amp non-inverting:  %.6f V\n", v_plus);
+        printf("  Op-amp inverting:      %.6f V\n", v_minus);
 
-    // Connect output to feedback path (divide by 2)
-    mna_add_capacitor(&solver, schmitt_out, timer_trig, 100e-12, NULL); // Small coupling cap
-    mna_add_resistor(&solver, timer_trig, gnd, 10e3, NULL); // Pull-down
+        // For DC, capacitor is open circuit, so the gain should be 2 (non-inverting amp)
+        double expected_output = 2.0;
+        double error = fabs(v_out - expected_output) / expected_output * 100.0;
+        printf("  Expected output: %.6f V, Error: %.2f%%\n", expected_output, error);
 
-    // Control voltage pin connection
-    mna_add_resistor(&solver, vco_control, timer_ctrl, 1e6, NULL); // High impedance buffer
-    mna_add_capacitor(&solver, timer_ctrl, gnd, 10e-9, NULL); // Filtering cap
-
-    printf("Initializing transient analysis...\n");
-    mna_init_transient(&solver);
-
-    printf("Running PLL transient simulation...\n");
-    double t = 0.0;
-    double dt = 1e-7; // 100ns timestep
-    double duration = 10e-3; // 10ms total duration (many cycles)
-    int steps = (int)(duration / dt);
-    int print_interval = (int)(0.001 / dt); // Print every 1ms
-
-    // Open file for results
-    FILE* output_file = fopen("pll_transient_results.csv", "w");
-    if (!output_file) {
-        printf("Failed to create output file\n");
-        mna_destroy(&solver);
-        return 1;
-    }
-
-    fprintf(output_file, "time,ref_input,vco_output,control_voltage,filter_voltage\n");
-
-    // Find reference source handle
-    ComponentHandle ref_source_handle = -1;
-    for (int i = 0; i < solver.num_components; i++) {
-        if (solver.components[i].node1 == ref_in && solver.components[i].node2 == gnd) {
-            ref_source_handle = i;
-            break;
+        if (error < 5.0) {
+            printf("  DC analysis: PASSED\n");
+        } else {
+            printf("  DC analysis: FAILED\n");
         }
     }
 
-    int success_count = 0;
-    int fail_count = 0;
+    printf("\n=== AC Analysis ===\n");
+    printf("Analyzing frequency response (10Hz to 100kHz)...\n");
 
-    // Simulation start time for performance measurement
-    clock_t start_time = clock();
+    // Open file for AC results
+    FILE* ac_file = fopen("ac_analysis_results.csv", "w");
+    if (!ac_file) {
+        printf("Failed to create AC analysis output file\n");
+        mna_destroy(&solver);
+        return 1;
+    }
 
-    for (int step = 0; step <= steps; step++) {
-        // Generate 1kHz square wave reference (period = 1ms)
-        double ref_period = 0.001; // 1ms = 1kHz
-        double ref_voltage = ((fmod(t, ref_period) < ref_period/2) ? 5.0 : 0.0);
-        solver.components[ref_source_handle].value = ref_voltage;
+    fprintf(ac_file, "frequency,vout_magnitude,vout_phase\n");
 
-        // Solve this time step
-        status = mna_solve_transient_step(&solver, dt);
+    // Logarithmic frequency sweep
+    double start_freq = 10.0;    // 10 Hz
+    double end_freq = 100e3;    // 100 kHz
+    int num_points = 50;
 
-        if (status == MNA_SUCCESS) {
-            success_count++;
-            double ref_val = mna_get_node_voltage(&solver, ref_in);
-            double vco_val = mna_get_node_voltage(&solver, vco_out);
-            double ctrl_val = mna_get_node_voltage(&solver, vco_control);
-            double filter_val = mna_get_node_voltage(&solver, filter_node2);
+    printf("Frequency (Hz)\tMagnitude (V)\tPhase (deg)\n");
+    printf("-------------------------------------------\n");
 
-            // Write to file (less frequently to keep file size manageable)
-            if (step % 10 == 0) {
-                fprintf(output_file, "%.6e,%.6e,%.6e,%.6e,%.6e\n",
-                       t, ref_val, vco_val, ctrl_val, filter_val);
-            }
+    for (int i = 0; i < num_points; i++) {
+        // Logarithmic spacing
+        double freq = start_freq * pow(end_freq/start_freq, (double)i/(num_points-1));
 
-            // Print progress periodically
-            if (step % print_interval == 0) {
-                printf("t = %.3f ms: Ref = %.3f V, VCO = %.3f V, Ctrl = %.3f V\n",
-                       t * 1000.0, ref_val, vco_val, ctrl_val);
-
-                // Check for convergence issues
-                if (fabs(ctrl_val) > 100.0) {
-                    printf("Warning: Control voltage is unusually high (%.3f V)\n", ctrl_val);
-                }
-            }
-        } else {
-            fail_count++;
-            printf("Transient step failed at t = %.3f ms (step %d): status %d\n",
-                   t * 1000.0, step, status);
-
-            if (fail_count > 5) {
-                printf("Too many failures, aborting simulation\n");
-                break;
-            }
-
-            // Try with smaller timestep on failure
-            dt /= 2.0;
-            step--; // Retry this step
+        status = mna_solve_ac(&solver, freq);
+        if (status != MNA_SUCCESS) {
+            printf("AC solve failed at %.1f Hz: %d\n", freq, status);
             continue;
         }
 
-        t += dt;
+        double complex vout_ac = mna_get_ac_node_voltage(&solver, vout);
+        double magnitude = cabs(vout_ac);
+        double phase = carg(vout_ac) * 180.0 / M_PI;
+
+        // Write to file
+        fprintf(ac_file, "%.6e,%.6e,%.6e\n", freq, magnitude, phase);
+
+        // Print key frequencies
+        if (i == 0 || i == num_points/4 || i == num_points/2 || i == 3*num_points/4 || i == num_points-1) {
+            printf("%9.1f\t%10.6f\t%8.2f\n", freq, magnitude, phase);
+        }
     }
 
-    clock_t end_time = clock();
-    double sim_time = (double)(end_time - start_time) / CLOCKS_PER_SEC;
+    fclose(ac_file);
+    printf("\nAC analysis results saved to ac_analysis_results.csv\n");
+    printf("Plot this file to see the low-pass filter response\n");
 
-    fclose(output_file);
-    printf("\nPLL transient simulation completed:\n");
-    printf("  Simulation time: %.2f seconds\n", sim_time);
-    printf("  Circuit time simulated: %.3f ms\n", t * 1000.0);
-    printf("  Successful steps: %d\n", success_count);
-    printf("  Failed steps: %d\n", fail_count);
-    printf("  Results saved to pll_transient_results.csv\n");
+    printf("\n=== Additional Test: Second-Order Filter with Custom Element ===\n");
+    printf("Creating a Sallen-Key low-pass filter circuit...\n");
 
-    // Print final voltages
-    double final_ref = mna_get_node_voltage(&solver, ref_in);
-    double final_vco = mna_get_node_voltage(&solver, vco_out);
-    double final_ctrl = mna_get_node_voltage(&solver, vco_control);
-    double final_filter = mna_get_node_voltage(&solver, filter_node2);
+    // Create new solver for second circuit
+    MNASolver solver2;
+    status = mna_init(&solver2);
+    if (status != MNA_SUCCESS) {
+        printf("Failed to initialize second solver: %d\n", status);
+        mna_destroy(&solver);
+        return 1;
+    }
 
-    printf("\nFinal steady-state voltages:\n");
-    printf("  Reference input: %.4f V\n", final_ref);
-    printf("  VCO output: %.4f V\n", final_vco);
-    printf("  Control voltage: %.4f V\n", final_ctrl);
-    printf("  Filter voltage: %.4f V\n", final_filter);
+    // Nodes for Sallen-Key filter
+    int gnd2 = 0;
+    int vin2 = mna_create_node(&solver2);
+    int vout2 = mna_create_node(&solver2);
+    int node_a = mna_create_node(&solver2);
+    int node_b = mna_create_node(&solver2);
 
+    // Voltage source
+    mna_add_voltage_source(&solver2, vin2, gnd2, 1.0, NULL);
+    mna_set_ac_source(&solver2, solver2.num_components-1, 1.0, 0.0);
+
+    // Sallen-Key components
+    mna_add_resistor(&solver2, vin2, node_a, 10e3, NULL);  // R1 = 10k
+    mna_add_capacitor(&solver2, node_a, node_b, 10e-9, NULL); // C1 = 10nF
+    mna_add_resistor(&solver2, node_b, gnd2, 10e3, NULL);  // R2 = 10k
+    mna_add_capacitor(&solver2, node_b, vout2, 10e-9, NULL); // C2 = 10nF
+
+    // VCVS (voltage-controlled voltage source) for unity gain buffer
+    double vcvs_gain = 1.0;
+    int vcvs_nodes[4] = {node_b, gnd2, vout2, gnd2}; // in+, in-, out+, out-
+    status = mna_add_custom_n_pole(&solver2, vcvs_nodes, 4, vcvs_stamp, &vcvs_gain, NULL);
+    if (status != MNA_SUCCESS) {
+        printf("Failed to add VCVS: %d\n", status);
+        mna_destroy(&solver);
+        mna_destroy(&solver2);
+        return 1;
+    }
+
+    printf("\nSolving DC for Sallen-Key filter...\n");
+    status = mna_solve_dc(&solver2);
+    if (status != MNA_SUCCESS) {
+        printf("DC solve failed for Sallen-Key: %d\n", status);
+    } else {
+        double vout_dc = mna_get_node_voltage(&solver2, vout2);
+        printf("DC output voltage: %.6f V (should be 1V for unity gain)\n", vout_dc);
+    }
+
+    printf("\nAnalyzing AC frequency response...\n");
+    FILE* ac_file2 = fopen("sallen_key_ac_results.csv", "w");
+    if (!ac_file2) {
+        printf("Failed to create Sallen-Key AC output file\n");
+        mna_destroy(&solver);
+        mna_destroy(&solver2);
+        return 1;
+    }
+
+    fprintf(ac_file2, "frequency,vout_magnitude,vout_phase\n");
+
+    // Calculate theoretical cutoff frequency for this Sallen-Key filter
+    // fc = 1/(2*pi*R*C) for equal R and C values
+    double r_val = 10e3;
+    double c_val = 10e-9;
+    double fc_theoretical = 1.0 / (2.0 * M_PI * r_val * c_val);
+    printf("Theoretical cutoff frequency: %.2f Hz\n", fc_theoretical);
+
+    printf("\nFrequency (Hz)\tMagnitude (V)\tPhase (deg)\n");
+    printf("-------------------------------------------\n");
+
+    for (int i = 0; i < num_points; i++) {
+        double freq = start_freq * pow(end_freq/start_freq, (double)i/(num_points-1));
+
+        status = mna_solve_ac(&solver2, freq);
+        if (status != MNA_SUCCESS) {
+            printf("AC solve failed at %.1f Hz for Sallen-Key: %d\n", freq, status);
+            continue;
+        }
+
+        double complex vout_ac = mna_get_ac_node_voltage(&solver2, vout2);
+        double magnitude = cabs(vout_ac);
+        double phase = carg(vout_ac) * 180.0 / M_PI;
+
+        fprintf(ac_file2, "%.6e,%.6e,%.6e\n", freq, magnitude, phase);
+
+        if (i == 0 || i == num_points/4 || i == num_points/2 || i == 3*num_points/4 || i == num_points-1) {
+            printf("%9.1f\t%10.6f\t%8.2f\n", freq, magnitude, phase);
+        }
+    }
+
+    fclose(ac_file2);
+    printf("\nSallen-Key AC analysis results saved to sallen_key_ac_results.csv\n");
+
+    // Clean up
     printf("\nCleaning up...\n");
     mna_destroy(&solver);
-    printf("Test completed!\n");
+    mna_destroy(&solver2);
 
     return 0;
+}
+
+// Simple ideal op-amp stamping function for testing
+void ideal_opamp_stamp(MNASolver* solver,
+                      const int* nodes,
+                      int num_nodes,
+                      void* user_data,
+                      double time,
+                      double dt) {
+    if (num_nodes != 3) {
+        fprintf(stderr, "Error: Op-amp requires exactly 3 terminals\n");
+        return;
+    }
+
+    double gain = *((double*)user_data);
+    int in_plus = nodes[0];   // Non-inverting input
+    int in_minus = nodes[1];  // Inverting input
+    int output = nodes[2];    // Output
+
+    // Stamp output equation: Vout = gain * (V+ - V-)
+    if (output > 0) {
+        MAT(solver, output-1, output-1) += 1.0;
+
+        if (in_plus > 0) MAT(solver, output-1, in_plus-1) -= gain;
+        if (in_minus > 0) MAT(solver, output-1, in_minus-1) += gain;
+
+        // Add small conductance for stability
+        MAT(solver, output-1, output-1) += 1e-9;
+    }
+
+    // Add very small conductances to input nodes
+    if (in_plus > 0) MAT(solver, in_plus-1, in_plus-1) += 1e-12;
+    if (in_minus > 0) MAT(solver, in_minus-1, in_minus-1) += 1e-12;
 }
