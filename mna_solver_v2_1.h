@@ -14,7 +14,6 @@ struct MNASolver;
 // Error codes
 typedef enum {
     MNA_SUCCESS,
-    MNA_COMPONENT_LIMIT_REACHED,   // Kept for API compatibility; not used in v2
     MNA_MATRIX_SINGULAR,
     MNA_CONVERGENCE_FAILURE,
     MNA_INVALID_HANDLE,

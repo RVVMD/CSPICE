@@ -1,4 +1,4 @@
-#ifndef MNA_SOLVER_V2_1_H
+
 #define MNA_SOLVER_V2_1_H
 #include <stdlib.h>
 #include <stdio.h>
@@ -14,6 +14,7 @@ struct MNASolver;
 // Error codes
 typedef enum {
     MNA_SUCCESS,
+    MNA_COMPONENT_LIMIT_REACHED,   // Kept for API compatibility; not used in v2
     MNA_MATRIX_SINGULAR,
     MNA_CONVERGENCE_FAILURE,
     MNA_INVALID_HANDLE,
