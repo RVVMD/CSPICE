@@ -1,4 +1,158 @@
-#include "mna_solver_v2.1.h"
+#ifndef MNA_SOLVER_V2_1_H
+#define MNA_SOLVER_V2_1_H
+#include <stdlib.h>
+#include <stdio.h>
+#include <math.h>
+#include <complex.h>
+#include <stdalign.h>
+#include <string.h>
+#include <stdbool.h>
+
+// Forward declaration of MNASolver for callback types
+struct MNASolver;
+
+// Error codes
+typedef enum {
+    MNA_SUCCESS,
+    MNA_MATRIX_SINGULAR,
+    MNA_CONVERGENCE_FAILURE,
+    MNA_INVALID_HANDLE,
+    MNA_INVALID_NODE,
+    MNA_INSUFFICIENT_MEMORY,
+    MNA_INVALID_PARAMETER
+} MNAStatus;
+
+// Opaque component handle
+typedef int ComponentHandle;
+
+// Default initial capacities (grow automatically)
+#define MNA_INIT_NODES_CAP     1
+#define MNA_INIT_SOURCES_CAP   1
+#define MNA_INIT_COMPONENTS_CAP 1
+#define MNA_MAX_ITER 50
+#define MNA_RELTOL 1e-6
+#define MNA_ABSTOL 1e-9
+#define MNA_VT 0.02585
+#define MNA_MIN_CONDUCTANCE 1e-12
+#define MNA_MAX_CONDUCTANCE 1e12
+#define TWO_PI 6.28318530717958647692
+
+// Unified nonlinear element type
+typedef enum {
+    NONLINEAR_RESISTOR,
+    NONLINEAR_CAPACITOR,
+    NONLINEAR_INDUCTOR
+} NonlinearType;
+
+// Unified source type
+typedef enum {
+    SOURCE_VOLTAGE,
+    SOURCE_CURRENT
+} SourceType;
+
+typedef enum {
+    MNA_RESISTOR,
+    MNA_CAPACITOR,
+    MNA_INDUCTOR,
+    MNA_SOURCE,
+    MNA_SWITCH,
+    MNA_CUSTOM_NONLINEAR,
+    MNA_CUSTOM_NPOLE  // New n-pole element type
+} ComponentType;
+
+// Component state for nonlinear callbacks
+typedef struct {
+    double voltage;
+    double current;
+    double charge;
+    double flux;
+    double dt;
+} ComponentState;
+
+// Generalized nonlinear function interface
+typedef void (*CustomNonlinearFunc)(const ComponentState* state, void* user_data,
+                                    double* value1, double* value2);
+
+// Callback function type for n-pole element stamping - uses forward declared MNASolver
+typedef void (*NPoleStampFunc)(struct MNASolver* solver,
+                              const int* nodes,
+                              int num_nodes,
+                              void* user_data,
+                              double time,
+                              double dt);
+
+// Structure to store n-pole element data
+typedef struct {
+    int* nodes;           // Array of node indices
+    int num_nodes;        // Number of terminals/poles
+    NPoleStampFunc stamp_func;  // Function to stamp the MNA matrix
+    void* user_data;      // User-defined data for the callback
+    double* last_values;  // Store last values for convergence checking
+} NPoleData;
+
+typedef struct {
+    ComponentType type;
+    int node1;
+    int node2;
+    double value;        // DC value
+    double ac_magnitude;
+    double ac_phase;
+    int state;
+    bool is_nonlinear;
+    // Source-specific fields
+    SourceType source_type;
+    // Nonlinear-specific fields
+    NonlinearType nonlinear_type;
+    double last_voltage;
+    double last_current;
+    double last_conductance;
+    double last_charge;
+    double last_flux;
+    CustomNonlinearFunc nonlinear_func;
+    void* user_data;
+    // Transient companion model
+    double trans_G_eq;
+    double trans_I_eq;
+    // Type-specific data union
+    union {
+        struct {  // For n-pole elements
+            NPoleData* npole_data;
+        } npole;
+    } data;
+} Component;
+
+typedef struct MNASolver {
+    // "Active" counts
+    int num_nodes;
+    int num_components;
+    int num_sources;
+    int num_nonlinear;
+    int max_node_index;
+    int transient_initialized;
+    double time;
+    double dt;
+    // Dynamic arrays
+    Component* components;
+    double* A;              // real system matrix (capacity size)
+    double* b;              // RHS (capacity size)
+    double* x;              // solution (capacity size)
+    double complex* ac_solution; // AC solution (capacity size)
+    // Capacity tracking
+    int cap_nodes;          // capacity in nodes (excludes ground)
+    int cap_sources;        // capacity in indep voltage sources
+    int cap_components;
+    int matrix_cap_size;    // cap_nodes + cap_sources
+} MNASolver;
+
+// mna_destroy declaration.
+void mna_destroy(MNASolver* solver);
+
+// Matrix access macro (capacity-indexed). Use active ranges when filling.
+#define MAT(solver, i, j) ((solver)->A[(i) * (solver)->matrix_cap_size + (j)])
+
+static inline int mna_active_size(const MNASolver* s) {
+    return s->max_node_index + s->num_sources;
+}
 
 static bool mna_resize_components(MNASolver* s, int required) {
     if (required <= s->cap_components) return true;
@@ -26,16 +180,13 @@ static bool mna_resize_matrix(MNASolver* s, int req_nodes, int req_sources) {
         s->cap_sources = need_sources;
         return true;
     }
-
     // Grow nodes/sources geometrically
     int new_nodes_cap = s->cap_nodes ? s->cap_nodes : MNA_INIT_NODES_CAP;
     int new_sources_cap = s->cap_sources ? s->cap_sources : MNA_INIT_SOURCES_CAP;
     while (new_nodes_cap < req_nodes)   new_nodes_cap = (int)(new_nodes_cap * 1.5) + 1;
     while (new_sources_cap < req_sources) new_sources_cap = (int)(new_sources_cap * 1.5) + 1;
-
     int new_size = new_nodes_cap + new_sources_cap;
     size_t elems = (size_t)new_size * (size_t)new_size;
-
     double* A2 = (double*)calloc(elems, sizeof(double));
     double* b2 = (double*)calloc((size_t)new_size, sizeof(double));
     double* x2 = (double*)calloc((size_t)new_size, sizeof(double));
@@ -44,7 +195,6 @@ static bool mna_resize_matrix(MNASolver* s, int req_nodes, int req_sources) {
         free(A2); free(b2); free(x2); free(ac2);
         return false;
     }
-
     // Copy old active region into new buffers
     int old_size = s->matrix_cap_size;
     if (s->A && old_size > 0) {
@@ -55,7 +205,6 @@ static bool mna_resize_matrix(MNASolver* s, int req_nodes, int req_sources) {
         memcpy(x2, s->x, (size_t)old_size * sizeof(double));
         memcpy(ac2, s->ac_solution, (size_t)old_size * sizeof(double complex));
     }
-
     free(s->A); free(s->b); free(s->x); free(s->ac_solution);
     s->A = A2; s->b = b2; s->x = x2; s->ac_solution = ac2;
     s->cap_nodes = new_nodes_cap;
@@ -73,24 +222,19 @@ static inline bool mna_ensure_matrix_capacity(MNASolver* s, int want_nodes, int 
     return mna_resize_matrix(s, want_nodes, want_sources);
 }
 
-// ---- Public API ----------------------------------------------------------
-
 MNAStatus mna_init_sized(MNASolver* solver, int max_nodes, int max_sources, int max_components) {
     memset(solver, 0, sizeof(MNASolver));
-
     // Set initial capacities (these will grow automatically later)
     solver->cap_nodes = (max_nodes > 0) ? max_nodes : MNA_INIT_NODES_CAP;
     solver->cap_sources = (max_sources > 0) ? max_sources : MNA_INIT_SOURCES_CAP;
     solver->cap_components = (max_components > 0) ? max_components : MNA_INIT_COMPONENTS_CAP;
     solver->matrix_cap_size = solver->cap_nodes + solver->cap_sources;
-
     // Allocate arrays
     solver->components = (Component*)calloc((size_t)solver->cap_components, sizeof(Component));
     solver->A = (double*)calloc((size_t)solver->matrix_cap_size * (size_t)solver->matrix_cap_size, sizeof(double));
     solver->b = (double*)calloc((size_t)solver->matrix_cap_size, sizeof(double));
     solver->x = (double*)calloc((size_t)solver->matrix_cap_size, sizeof(double));
     solver->ac_solution = (double complex*)calloc((size_t)solver->matrix_cap_size, sizeof(double complex));
-
     if (!solver->components || !solver->A || !solver->b || !solver->x || !solver->ac_solution) {
         mna_destroy(solver);
         return MNA_INSUFFICIENT_MEMORY;
@@ -100,6 +244,18 @@ MNAStatus mna_init_sized(MNASolver* solver, int max_nodes, int max_sources, int 
 
 void mna_destroy(MNASolver* solver) {
     if (!solver) return;
+
+    // Free n-pole element data
+    for (int i = 0; i < solver->num_components; i++) {
+        Component* comp = &solver->components[i];
+        if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+            NPoleData* npole = comp->data.npole.npole_data;
+            free(npole->nodes);
+            free(npole->last_values);
+            free(npole);
+        }
+    }
+
     free(solver->components);
     free(solver->A);
     free(solver->b);
@@ -132,15 +288,13 @@ MNAStatus mna_validate_nodes(MNASolver* solver, int node1, int node2) {
 }
 
 MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, int node2,
-                          double value, SourceType src_type, ComponentHandle* handle) {
+                           double value, SourceType src_type, ComponentHandle* handle) {
     MNAStatus status = mna_validate_nodes(solver, node1, node2);
     if (status != MNA_SUCCESS) return status;
-
     int new_count = solver->num_components + 1;
     if (!mna_ensure_component_capacity(solver, new_count)) {
         return MNA_INSUFFICIENT_MEMORY;
     }
-
     Component comp;
     memset(&comp, 0, sizeof(comp));
     comp.type = type;
@@ -151,10 +305,8 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
     comp.is_nonlinear = false;
     comp.source_type = src_type;
     comp.nonlinear_type = NONLINEAR_RESISTOR;
-
     int index = solver->num_components++;
     solver->components[index] = comp;
-
     if (type == MNA_SOURCE && src_type == SOURCE_VOLTAGE) {
         // Ensure matrix capacity for another voltage source column/row
         if (!mna_ensure_matrix_capacity(solver, solver->max_node_index, solver->num_sources + 1)) {
@@ -162,60 +314,57 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
         }
         solver->num_sources++;
     }
-
     if (handle) *handle = index;
     return MNA_SUCCESS;
 }
 
 MNAStatus mna_add_resistor(MNASolver* solver, int node1, int node2, double value,
-                         ComponentHandle* handle) {
+                          ComponentHandle* handle) {
     return mna_add_component(solver, MNA_RESISTOR, node1, node2, value,
                             SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_capacitor(MNASolver* solver, int node1, int node2, double value,
-                          ComponentHandle* handle) {
+                           ComponentHandle* handle) {
     return mna_add_component(solver, MNA_CAPACITOR, node1, node2, value,
                             SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_inductor(MNASolver* solver, int node1, int node2, double value,
-                         ComponentHandle* handle) {
+                          ComponentHandle* handle) {
     return mna_add_component(solver, MNA_INDUCTOR, node1, node2, value,
                             SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_voltage_source(MNASolver* solver, int node1, int node2, double value,
-                               ComponentHandle* handle) {
+                                ComponentHandle* handle) {
     return mna_add_component(solver, MNA_SOURCE, node1, node2, value,
                             SOURCE_VOLTAGE, handle);
 }
 
 MNAStatus mna_add_current_source(MNASolver* solver, int node1, int node2, double value,
-                               ComponentHandle* handle) {
+                                ComponentHandle* handle) {
     return mna_add_component(solver, MNA_SOURCE, node1, node2, value,
                             SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_switch(MNASolver* solver, int node1, int node2, double value,
-                       ComponentHandle* handle) {
+                        ComponentHandle* handle) {
     return mna_add_component(solver, MNA_SWITCH, node1, node2, value,
                             SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2,
-                                 NonlinearType nl_type,
-                                 CustomNonlinearFunc func, void* user_data,
-                                 double initial_value1, double initial_value2,
-                                 ComponentHandle* handle) {
+                                  NonlinearType nl_type,
+                                  CustomNonlinearFunc func, void* user_data,
+                                  double initial_value1, double initial_value2,
+                                  ComponentHandle* handle) {
     MNAStatus status = mna_validate_nodes(solver, node1, node2);
     if (status != MNA_SUCCESS) return status;
-
     int new_count = solver->num_components + 1;
     if (!mna_ensure_component_capacity(solver, new_count)) {
         return MNA_INSUFFICIENT_MEMORY;
     }
-
     Component comp;
     memset(&comp, 0, sizeof(comp));
     comp.type = MNA_CUSTOM_NONLINEAR;
@@ -227,7 +376,6 @@ MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2,
     comp.nonlinear_type = nl_type;
     comp.nonlinear_func = func;
     comp.user_data = user_data;
-
     switch (nl_type) {
         case NONLINEAR_RESISTOR:
             comp.last_voltage = initial_value1;
@@ -241,7 +389,6 @@ MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2,
             comp.last_flux = initial_value2;
             break;
     }
-
     int index = solver->num_components++;
     solver->components[index] = comp;
     solver->num_nonlinear++;
@@ -249,8 +396,70 @@ MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2,
     return MNA_SUCCESS;
 }
 
+// New function to add custom n-pole elements
+MNAStatus mna_add_custom_n_pole(MNASolver* solver,
+                               const int* nodes,
+                               int num_nodes,
+                               NPoleStampFunc stamp_func,
+                               void* user_data,
+                               ComponentHandle* handle) {
+    // Validate all nodes
+    for (int i = 0; i < num_nodes; i++) {
+        if (nodes[i] < 0 || nodes[i] > solver->max_node_index) {
+            return MNA_INVALID_NODE;
+        }
+    }
+
+    // Ensure component capacity for the new element
+    int new_count = solver->num_components + 1;
+    if (!mna_ensure_component_capacity(solver, new_count)) {
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+
+    // Create and initialize component
+    Component comp;
+    memset(&comp, 0, sizeof(comp));
+    comp.type = MNA_CUSTOM_NPOLE;
+    comp.node1 = (num_nodes > 0) ? nodes[0] : 0;
+    comp.node2 = (num_nodes > 1) ? nodes[1] : 0;
+    comp.is_nonlinear = true;  // Consider n-pole elements as potentially nonlinear
+
+    // Allocate and initialize n-pole specific data
+    comp.data.npole.npole_data = (NPoleData*)malloc(sizeof(NPoleData));
+    if (!comp.data.npole.npole_data) {
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+
+    comp.data.npole.npole_data->nodes = (int*)malloc((size_t)num_nodes * sizeof(int));
+    if (!comp.data.npole.npole_data->nodes) {
+        free(comp.data.npole.npole_data);
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+
+    comp.data.npole.npole_data->last_values = (double*)calloc((size_t)num_nodes, sizeof(double));
+    if (!comp.data.npole.npole_data->last_values) {
+        free(comp.data.npole.npole_data->nodes);
+        free(comp.data.npole.npole_data);
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+
+    // Copy node indices
+    memcpy(comp.data.npole.npole_data->nodes, nodes, (size_t)num_nodes * sizeof(int));
+    comp.data.npole.npole_data->num_nodes = num_nodes;
+    comp.data.npole.npole_data->stamp_func = stamp_func;
+    comp.data.npole.npole_data->user_data = user_data;
+
+    // Add component to solver
+    int index = solver->num_components++;
+    solver->components[index] = comp;
+    solver->num_nonlinear++;  // Count as nonlinear element
+
+    if (handle) *handle = index;
+    return MNA_SUCCESS;
+}
+
 MNAStatus mna_set_ac_source(MNASolver* solver, ComponentHandle handle,
-                          double magnitude, double phase) {
+                           double magnitude, double phase) {
     if (handle < 0 || handle >= solver->num_components) {
         return MNA_INVALID_HANDLE;
     }
@@ -300,7 +509,6 @@ void mna_stamp_voltage_source(MNASolver* solver, int comp_index, int source_idx)
     int v_index = solver->max_node_index + source_idx;
     int n1 = vs->node1;
     int n2 = vs->node2;
-
     if (n1 > 0) {
         MAT(solver, n1-1, v_index) = 1.0;
         MAT(solver, v_index, n1-1) = 1.0;
@@ -309,7 +517,6 @@ void mna_stamp_voltage_source(MNASolver* solver, int comp_index, int source_idx)
         MAT(solver, n2-1, v_index) = -1.0;
         MAT(solver, v_index, n2-1) = -1.0;
     }
-
     solver->b[v_index] = vs->value;
 }
 
@@ -317,7 +524,6 @@ void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index, int is_dc) {
     Component* comp = &solver->components[comp_index];
     int n1 = comp->node1;
     int n2 = comp->node2;
-
     ComponentState state = {
         .voltage = comp->last_voltage,
         .current = comp->last_current,
@@ -325,52 +531,41 @@ void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index, int is_dc) {
         .flux = comp->last_flux,
         .dt = solver->dt
     };
-
     switch (comp->nonlinear_type) {
         case NONLINEAR_RESISTOR: {
             double current, conductance;
             comp->nonlinear_func(&state, comp->user_data, &current, &conductance);
-
             if (conductance < MNA_MIN_CONDUCTANCE) conductance = MNA_MIN_CONDUCTANCE;
             if (conductance > MNA_MAX_CONDUCTANCE) conductance = MNA_MAX_CONDUCTANCE;
-
             mna_stamp_conductance(solver, n1, n2, conductance);
             mna_stamp_current_source(solver, n1, n2, (current - conductance * state.voltage));
             break;
         }
-
         case NONLINEAR_CAPACITOR: {
             if (is_dc) {
                 mna_stamp_conductance(solver, n1, n2, MNA_MIN_CONDUCTANCE);
             } else {
                 double q0, C0;
                 comp->nonlinear_func(&state, comp->user_data, &q0, &C0);
-
                 double G_eq = C0 / solver->dt;
                 double I_eq = (q0 - comp->last_charge) / solver->dt - G_eq * state.voltage;
-
                 comp->trans_G_eq = G_eq;
                 comp->trans_I_eq = I_eq;
-
                 mna_stamp_conductance(solver, n1, n2, G_eq);
                 mna_stamp_current_source(solver, n1, n2, I_eq);
             }
             break;
         }
-
         case NONLINEAR_INDUCTOR: {
             if (is_dc) {
                 mna_stamp_conductance(solver, n1, n2, MNA_MAX_CONDUCTANCE);
             } else {
                 double phi0, L0;
                 comp->nonlinear_func(&state, comp->user_data, &phi0, &L0);
-
                 double G_eq = solver->dt / L0;
                 double I_eq = state.current + (phi0 - comp->last_flux) / L0;
-
                 comp->trans_G_eq = G_eq;
                 comp->trans_I_eq = I_eq;
-
                 mna_stamp_conductance(solver, n1, n2, G_eq);
                 mna_stamp_current_source(solver, n1, n2, I_eq);
             }
@@ -379,11 +574,30 @@ void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index, int is_dc) {
     }
 }
 
+static void mna_ensure_ground_paths(MNASolver* solver) {
+    int* connected = (int*)calloc((size_t)(solver->max_node_index + 1), sizeof(int));
+    if (!connected) return;
+    connected[0] = 1;
+    for (int i = 0; i < solver->num_components; i++) {
+        Component* comp = &solver->components[i];
+        if (comp->node1 == 0 && comp->node2 > 0) {
+            connected[comp->node2] = 1;
+        } else if (comp->node2 == 0 && comp->node1 > 0) {
+            connected[comp->node1] = 1;
+        }
+    }
+    for (int node = 1; node <= solver->max_node_index; node++) {
+        if (!connected[node]) {
+            mna_stamp_conductance(solver, node, 0, 1e-9);
+        }
+    }
+    free(connected);
+}
+
 MNAStatus mna_solve_linear_system(MNASolver* solver, int size) {
     const double pivot_threshold = 1e-12;
     double max_val;
     int max_row;
-
     for (int pivot = 0; pivot < size; pivot++) {
         // Find pivot (partial pivoting)
         max_row = pivot;
@@ -395,12 +609,10 @@ MNAStatus mna_solve_linear_system(MNASolver* solver, int size) {
                 max_row = i;
             }
         }
-
         // Singularity check
         if (max_val < pivot_threshold) {
             return MNA_MATRIX_SINGULAR;
         }
-
         // Swap rows if needed
         if (max_row != pivot) {
             for (int j = pivot; j < size; j++) {
@@ -412,7 +624,6 @@ MNAStatus mna_solve_linear_system(MNASolver* solver, int size) {
             solver->b[pivot] = solver->b[max_row];
             solver->b[max_row] = tempb;
         }
-
         // Elimination
         const double pivot_inv = 1.0 / MAT(solver, pivot, pivot);
         for (int i = pivot + 1; i < size; i++) {
@@ -425,7 +636,6 @@ MNAStatus mna_solve_linear_system(MNASolver* solver, int size) {
             MAT(solver, i, pivot) = 0.0;
         }
     }
-
     // Back substitution
     for (int i = size - 1; i >= 0; i--) {
         double sum = solver->b[i];
@@ -434,7 +644,6 @@ MNAStatus mna_solve_linear_system(MNASolver* solver, int size) {
         }
         solver->x[i] = sum / MAT(solver, i, i);
     }
-
     return MNA_SUCCESS;
 }
 
@@ -446,12 +655,10 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
         // Standard linear solution for circuits without nonlinear components
         mna_reset_system(solver);
         int source_count = 0;
-
         for (int i = 0; i < solver->num_components; i++) {
             Component* comp = &solver->components[i];
             const int n1 = comp->node1;
             const int n2 = comp->node2;
-
             switch (comp->type) {
                 case MNA_RESISTOR:
                     mna_stamp_conductance(solver, n1, n2, 1.0 / comp->value);
@@ -473,6 +680,21 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                     // Fallback
                     mna_stamp_conductance(solver, n1, n2, MNA_MIN_CONDUCTANCE);
                     break;
+                case MNA_CUSTOM_NPOLE: {
+                    // Stamp n-pole element directly into the matrix
+                    NPoleData* npole = comp->data.npole.npole_data;
+                    if (npole) {
+                        npole->stamp_func(
+                            solver,
+                            npole->nodes,
+                            npole->num_nodes,
+                            npole->user_data,
+                            0.0,  // DC analysis, time = 0
+                            0.0   // DC analysis, dt = 0
+                        );
+                    }
+                    break;
+                }
                 case MNA_SWITCH: {
                     const double g = comp->state ?
                         1.0 / comp->value : MNA_MIN_CONDUCTANCE;
@@ -487,6 +709,15 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
     // Nonlinear circuit - source stepping with adaptive step size
     double* orig_source_values = (double*)malloc((size_t)solver->num_components * sizeof(double));
     if (!orig_source_values) return MNA_INSUFFICIENT_MEMORY;
+
+    // Initialize n-pole element states
+    for (int i = 0; i < solver->num_components; i++) {
+        Component* comp = &solver->components[i];
+        if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+            memset(comp->data.npole.npole_data->last_values, 0,
+                   (size_t)comp->data.npole.npole_data->num_nodes * sizeof(double));
+        }
+    }
 
     // Save original source values and set initial state to zero
     for (int i = 0; i < solver->num_components; i++) {
@@ -509,11 +740,9 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
     MNAStatus status = MNA_SUCCESS;
     int total_steps = 0;
     const int max_total_steps = 200;
-
     while (current_factor < 1.0 && total_steps < max_total_steps) {
         double next_factor = current_factor + step_size;
         if (next_factor > 1.0) next_factor = 1.0;
-
         // Update sources to current factor
         for (int i = 0; i < solver->num_components; i++) {
             Component* comp = &solver->components[i];
@@ -521,16 +750,13 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                 comp->value = orig_source_values[i] * next_factor;
             }
         }
-
         // Solve at current source level
         mna_reset_system(solver);
         int source_count = 0;
-
         for (int i = 0; i < solver->num_components; i++) {
             Component* comp = &solver->components[i];
             const int n1 = comp->node1;
             const int n2 = comp->node2;
-
             switch (comp->type) {
                 case MNA_RESISTOR:
                     mna_stamp_conductance(solver, n1, n2, 1.0 / comp->value);
@@ -551,6 +777,20 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                 case MNA_CUSTOM_NONLINEAR:
                     mna_stamp_custom_nonlinear(solver, i, 1);
                     break;
+                case MNA_CUSTOM_NPOLE: {
+                    NPoleData* npole = comp->data.npole.npole_data;
+                    if (npole) {
+                        npole->stamp_func(
+                            solver,
+                            npole->nodes,
+                            npole->num_nodes,
+                            npole->user_data,
+                            0.0,  // DC analysis
+                            0.0   // DC analysis
+                        );
+                    }
+                    break;
+                }
                 case MNA_SWITCH: {
                     const double g = comp->state ?
                         1.0 / comp->value : MNA_MIN_CONDUCTANCE;
@@ -559,68 +799,87 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                 }
             }
         }
-
         // Solve linear system to get initial guess
         status = mna_solve_linear_system(solver, matrix_size);
         if (status != MNA_SUCCESS) break;
-
         // Newton-Raphson iterations at current source level
         int converged = 0;
         int iteration = 0;
-
         while (!converged && iteration < MNA_MAX_ITER) {
             converged = 1;
-
-            // Update nonlinear component states
+            // Update nonlinear component states including n-pole elements
             for (int i = 0; i < solver->num_components; i++) {
                 Component* comp = &solver->components[i];
-                if (comp->type != MNA_CUSTOM_NONLINEAR) continue;
-
-                const int n1 = comp->node1;
-                const int n2 = comp->node2;
-                const double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
-                const double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
-                const double new_voltage = v1 - v2;
-                const double voltage_diff = fabs(new_voltage - comp->last_voltage);
-                const double abs_tol = MNA_ABSTOL + MNA_RELTOL * fabs(new_voltage);
-
-                // Damping for convergence (0.5 for first 5 iterations, 0.9 after)
-                const double damping = (iteration < 5) ? 0.5 : 0.9;
-                comp->last_voltage = damping * new_voltage +
-                                    (1 - damping) * comp->last_voltage;
-
-                // Update nonlinear parameters
-                if (comp->nonlinear_type == NONLINEAR_RESISTOR) {
-                    ComponentState state = {
-                        .voltage = comp->last_voltage,
-                        .current = comp->last_current,
-                        .charge = comp->last_charge,
-                        .flux = comp->last_flux,
-                        .dt = solver->dt
-                    };
-                    double val1, val2;
-                    comp->nonlinear_func(&state, comp->user_data, &val1, &val2);
-                    comp->last_conductance =
-                        (val2 < MNA_MIN_CONDUCTANCE) ? MNA_MIN_CONDUCTANCE :
-                        (val2 > MNA_MAX_CONDUCTANCE) ? MNA_MAX_CONDUCTANCE : val2;
-                }
-
-                if (voltage_diff > abs_tol) {
-                    converged = 0;
+                if (comp->type == MNA_CUSTOM_NONLINEAR) {
+                    const int n1 = comp->node1;
+                    const int n2 = comp->node2;
+                    const double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
+                    const double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
+                    const double new_voltage = v1 - v2;
+                    const double voltage_diff = fabs(new_voltage - comp->last_voltage);
+                    const double abs_tol = MNA_ABSTOL + MNA_RELTOL * fabs(new_voltage);
+                    // Damping for convergence (0.5 for first 5 iterations, 0.9 after)
+                    const double damping = (iteration < 5) ? 0.5 : 0.9;
+                    comp->last_voltage = damping * new_voltage +
+                                        (1 - damping) * comp->last_voltage;
+                    // Update nonlinear parameters
+                    if (comp->nonlinear_type == NONLINEAR_RESISTOR) {
+                        ComponentState state = {
+                            .voltage = comp->last_voltage,
+                            .current = comp->last_current,
+                            .charge = comp->last_charge,
+                            .flux = comp->last_flux,
+                            .dt = solver->dt
+                        };
+                        double val1, val2;
+                        comp->nonlinear_func(&state, comp->user_data, &val1, &val2);
+                        comp->last_conductance =
+                            (val2 < MNA_MIN_CONDUCTANCE) ? MNA_MIN_CONDUCTANCE :
+                            (val2 > MNA_MAX_CONDUCTANCE) ? MNA_MAX_CONDUCTANCE : val2;
+                    }
+                    if (voltage_diff > abs_tol) {
+                        converged = 0;
+                    }
+                } else if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+                    NPoleData* npole = comp->data.npole.npole_data;
+                    // Get current node voltages
+                    double* current_values = (double*)malloc((size_t)npole->num_nodes * sizeof(double));
+                    if (!current_values) {
+                        status = MNA_INSUFFICIENT_MEMORY;
+                        break;
+                    }
+                    // Calculate node voltages
+                    for (int j = 0; j < npole->num_nodes; j++) {
+                        current_values[j] = (npole->nodes[j] > 0) ?
+                            solver->x[npole->nodes[j]-1] : 0.0;
+                    }
+                    // Check convergence with damping
+                    double max_diff = 0.0;
+                    for (int j = 0; j < npole->num_nodes; j++) {
+                        double diff = fabs(current_values[j] - npole->last_values[j]);
+                        if (diff > max_diff) max_diff = diff;
+                        // Apply damping (0.5 for first 5 iterations, 0.9 after)
+                        double damping = (iteration < 5) ? 0.5 : 0.9;
+                        npole->last_values[j] = damping * current_values[j] +
+                                               (1 - damping) * npole->last_values[j];
+                    }
+                    free(current_values);
+                    // Check if this element has converged
+                    double abs_tol = MNA_ABSTOL + MNA_RELTOL * max_diff;
+                    if (max_diff > abs_tol) {
+                        converged = 0;
+                    }
                 }
             }
-
-            if (converged) break;
-
+            if (status != MNA_SUCCESS || converged) break;
             // Re-stamp nonlinear components with updated values
             mna_reset_system(solver);
+            mna_ensure_ground_paths(solver);
             int source_count2 = 0;
-
             for (int i = 0; i < solver->num_components; i++) {
                 Component* comp = &solver->components[i];
                 const int n1 = comp->node1;
                 const int n2 = comp->node2;
-
                 switch (comp->type) {
                     case MNA_RESISTOR:
                         mna_stamp_conductance(solver, n1, n2, 1.0 / comp->value);
@@ -641,6 +900,20 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                     case MNA_CUSTOM_NONLINEAR:
                         mna_stamp_custom_nonlinear(solver, i, 1);
                         break;
+                    case MNA_CUSTOM_NPOLE: {
+                        NPoleData* npole = comp->data.npole.npole_data;
+                        if (npole) {
+                            npole->stamp_func(
+                                solver,
+                                npole->nodes,
+                                npole->num_nodes,
+                                npole->user_data,
+                                0.0,  // DC analysis
+                                0.0   // DC analysis
+                            );
+                        }
+                        break;
+                    }
                     case MNA_SWITCH: {
                         const double g = comp->state ?
                             1.0 / comp->value : MNA_MIN_CONDUCTANCE;
@@ -649,13 +922,10 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
                     }
                 }
             }
-
             status = mna_solve_linear_system(solver, matrix_size);
             if (status != MNA_SUCCESS) break;
-
             iteration++;
         }
-
         if (status != MNA_SUCCESS || !converged) {
             // Reduce step size and retry
             step_size /= 2.0;
@@ -665,16 +935,13 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
             }
             continue;  // Retry with smaller step
         }
-
         // Successful step - move to next source level
         current_factor = next_factor;
         total_steps++;
-
         // Increase step size for next step (with upper bound)
         step_size *= 1.5;
         if (step_size > max_step) step_size = max_step;
     }
-
     // Restore original source values
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
@@ -683,38 +950,31 @@ MNAStatus mna_solve_dc(MNASolver* solver) {
         }
     }
     free(orig_source_values);
-
     return status;
 }
 
 MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
     double omega = TWO_PI * frequency;
     int matrix_size = mna_active_size(solver);
-
     if (matrix_size > solver->matrix_cap_size) {
         return MNA_INVALID_PARAMETER;
     }
-
     // Allocate temporary complex arrays for this solve (could be cached if desired)
     double complex* A_complex = (double complex*)calloc((size_t)matrix_size * (size_t)matrix_size, sizeof(double complex));
     double complex* b_complex = (double complex*)calloc((size_t)matrix_size, sizeof(double complex));
     double complex* x_complex = (double complex*)calloc((size_t)matrix_size, sizeof(double complex));
-
     if (!A_complex || !b_complex || !x_complex) {
         free(A_complex);
         free(b_complex);
         free(x_complex);
         return MNA_INSUFFICIENT_MEMORY;
     }
-
     double complex admittance;
     int source_count = 0;
-
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
         int n2 = comp->node2;
-
         switch (comp->type) {
             case MNA_RESISTOR:
                 admittance = 1.0 / comp->value;
@@ -725,7 +985,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                     A_complex[(n2-1) * matrix_size + (n1-1)] -= admittance;
                 }
                 break;
-
             case MNA_CAPACITOR:
                 admittance = I * omega * comp->value;
                 if (n1 > 0) A_complex[(n1-1) * matrix_size + (n1-1)] += admittance;
@@ -735,7 +994,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                     A_complex[(n2-1) * matrix_size + (n1-1)] -= admittance;
                 }
                 break;
-
             case MNA_INDUCTOR:
                 if (omega == 0) {
                     admittance = 1.0 / MNA_MIN_CONDUCTANCE;
@@ -749,11 +1007,9 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                     A_complex[(n2-1) * matrix_size + (n1-1)] -= admittance;
                 }
                 break;
-
             case MNA_SOURCE: {
                 double complex source_val = comp->ac_magnitude *
                     (cos(comp->ac_phase) + I * sin(comp->ac_phase));
-
                 if (comp->source_type == SOURCE_VOLTAGE) {
                     int v_index = solver->max_node_index + source_count;
                     if (n1 > 0) {
@@ -772,7 +1028,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                 }
                 break;
             }
-
             case MNA_CUSTOM_NONLINEAR: {
                 switch (comp->nonlinear_type) {
                     case NONLINEAR_RESISTOR:
@@ -805,7 +1060,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                         break;
                     }
                 }
-
                 if (n1 > 0) A_complex[(n1-1) * matrix_size + (n1-1)] += admittance;
                 if (n2 > 0) A_complex[(n2-1) * matrix_size + (n2-1)] += admittance;
                 if (n1 > 0 && n2 > 0) {
@@ -814,12 +1068,29 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                 }
                 break;
             }
-
+            case MNA_CUSTOM_NPOLE: {
+                // For AC analysis, we need a special approach for n-pole elements.
+                // We'll create a temporary solver with complex values to handle this.
+                // Note: This is a simplified approach; a full implementation might require
+                // a dedicated AC stamping function for n-pole elements.
+                fprintf(stderr, "Warning: AC analysis for n-pole elements uses DC approximation\n");
+                NPoleData* npole = comp->data.npole.npole_data;
+                if (npole) {
+                    npole->stamp_func(
+                        solver,
+                        npole->nodes,
+                        npole->num_nodes,
+                        npole->user_data,
+                        0.0,  // AC steady-state, time = 0
+                        0.0   // AC steady-state, dt not applicable
+                    );
+                }
+                break;
+            }
             case MNA_SWITCH: {
                 double g = comp->state ?
                     1.0 / comp->value :
                     MNA_MIN_CONDUCTANCE;
-
                 if (n1 > 0) A_complex[(n1-1) * matrix_size + (n1-1)] += g;
                 if (n2 > 0) A_complex[(n2-1) * matrix_size + (n2-1)] += g;
                 if (n1 > 0 && n2 > 0) {
@@ -830,7 +1101,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
             }
         }
     }
-
     // Solve complex linear system (Gaussian elim + partial pivoting on magnitudes)
     for (int pivot = 0; pivot < matrix_size; pivot++) {
         int max_row = pivot;
@@ -842,14 +1112,12 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                 max_row = i;
             }
         }
-
         if (max_mag < MNA_MIN_CONDUCTANCE) {
             free(A_complex);
             free(b_complex);
             free(x_complex);
             return MNA_MATRIX_SINGULAR;
         }
-
         if (max_row != pivot) {
             for (int j = pivot; j < matrix_size; j++) {
                 double complex temp = A_complex[pivot * matrix_size + j];
@@ -860,7 +1128,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
             b_complex[pivot] = b_complex[max_row];
             b_complex[max_row] = tempb;
         }
-
         for (int i = pivot + 1; i < matrix_size; i++) {
             double complex factor = A_complex[i * matrix_size + pivot] / A_complex[pivot * matrix_size + pivot];
             if (factor == 0.0) continue;
@@ -871,7 +1138,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
             A_complex[i * matrix_size + pivot] = 0.0;
         }
     }
-
     // Back substitution
     for (int i = matrix_size - 1; i >= 0; i--) {
         x_complex[i] = b_complex[i];
@@ -880,12 +1146,10 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
         }
         x_complex[i] /= A_complex[i * matrix_size + i];
     }
-
     // Store solution (into capacity-sized buffer's active prefix)
     for (int i = 0; i < matrix_size; i++) {
         solver->ac_solution[i] = x_complex[i];
     }
-
     free(A_complex);
     free(b_complex);
     free(x_complex);
@@ -900,7 +1164,14 @@ void mna_init_transient(MNASolver* solver) {
         comp->last_current = 0.0;
         comp->last_charge = 0.0;
         comp->last_flux = 0.0;
+        if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+            NPoleData* npole = comp->data.npole.npole_data;
+            if (npole->last_values) {
+                memset(npole->last_values, 0, (size_t)npole->num_nodes * sizeof(double));
+            }
+        }
     }
+    solver->transient_initialized = 1;
 }
 
 MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
@@ -908,19 +1179,16 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
     int matrix_size = mna_active_size(solver);
     mna_reset_system(solver);
     int source_count = 0;
-
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
         int n2 = comp->node2;
-
         switch (comp->type) {
             case MNA_RESISTOR: {
                 double g = 1.0 / comp->value;
                 mna_stamp_conductance(solver, n1, n2, g);
                 break;
             }
-
             case MNA_CAPACITOR: {
                 double G_eq = comp->value / dt;
                 double I_eq = -G_eq * comp->last_voltage;
@@ -928,7 +1196,6 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                 mna_stamp_current_source(solver, n1, n2, I_eq);
                 break;
             }
-
             case MNA_INDUCTOR: {
                 double G_eq = dt / comp->value;
                 double I_eq = comp->last_current;
@@ -936,7 +1203,6 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                 mna_stamp_current_source(solver, n1, n2, I_eq);
                 break;
             }
-
             case MNA_SOURCE: {
                 if (comp->source_type == SOURCE_VOLTAGE) {
                     mna_stamp_voltage_source(solver, i, source_count++);
@@ -945,12 +1211,24 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                 }
                 break;
             }
-
             case MNA_CUSTOM_NONLINEAR: {
                 mna_stamp_custom_nonlinear(solver, i, 0);
                 break;
             }
-
+            case MNA_CUSTOM_NPOLE: {
+                NPoleData* npole = comp->data.npole.npole_data;
+                if (npole) {
+                    npole->stamp_func(
+                        solver,
+                        npole->nodes,
+                        npole->num_nodes,
+                        npole->user_data,
+                        solver->time,
+                        dt
+                    );
+                }
+                break;
+            }
             case MNA_SWITCH: {
                 double g = comp->state ?
                     1.0 / comp->value :
@@ -960,40 +1238,33 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
             }
         }
     }
-
     MNAStatus status = mna_solve_linear_system(solver, matrix_size);
     if (status != MNA_SUCCESS) {
         return status;
     }
-
     // Update component states
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         int n1 = comp->node1;
         int n2 = comp->node2;
-
         double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
         double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
         double v = v1 - v2;
-
         switch (comp->type) {
             case MNA_CAPACITOR:
                 comp->last_current = (v - comp->last_voltage) * (comp->value / dt);
                 comp->last_voltage = v;
                 break;
-
             case MNA_INDUCTOR: {
                 double di = v * (dt / comp->value);
                 comp->last_current += di;
                 break;
             }
-
             case MNA_CUSTOM_NONLINEAR:
                 switch (comp->nonlinear_type) {
                     case NONLINEAR_RESISTOR:
                         comp->last_voltage = v;
                         break;
-
                     case NONLINEAR_CAPACITOR: {
                         ComponentState state = {
                             .voltage = v,
@@ -1008,7 +1279,6 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                         comp->last_charge = q;
                         break;
                     }
-
                     case NONLINEAR_INDUCTOR: {
                         double i_new = comp->trans_I_eq + comp->trans_G_eq * v;
                         ComponentState state = {
@@ -1026,12 +1296,20 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                     }
                 }
                 break;
-
+            case MNA_CUSTOM_NPOLE:
+                if (comp->data.npole.npole_data) {
+                    NPoleData* npole = comp->data.npole.npole_data;
+                    // Update last values for convergence checking in next iteration
+                    for (int j = 0; j < npole->num_nodes; j++) {
+                        npole->last_values[j] = (npole->nodes[j] > 0) ?
+                            solver->x[npole->nodes[j]-1] : 0.0;
+                    }
+                }
+                break;
             default:
                 break;
         }
     }
-
     solver->time += dt;
     return MNA_SUCCESS;
 }
@@ -1048,21 +1326,18 @@ double complex mna_get_ac_node_voltage(MNASolver* solver, int node) {
 
 double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
     if (handle < 0 || handle >= solver->num_components) return 0.0;
-
     Component* comp = &solver->components[handle];
     int n1 = comp->node1;
     int n2 = comp->node2;
-
     double v1 = (n1 > 0) ? mna_get_node_voltage(solver, n1) : 0.0;
     double v2 = (n2 > 0) ? mna_get_node_voltage(solver, n2) : 0.0;
     double v = v1 - v2;
-
     switch (comp->type) {
         case MNA_RESISTOR:
             return v / comp->value;
         case MNA_CAPACITOR:
             if (!solver->transient_initialized || solver->dt == 0.0) {
-                // DC / no transient info — capacitor acts as open circuit
+                // DC / no transient info - capacitor acts as open circuit
                 return 0.0;
             } else {
                 return (v - comp->last_voltage) * (comp->value / solver->dt);
@@ -1097,6 +1372,10 @@ double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
             comp->nonlinear_func(&state, comp->user_data, &current, &conductance);
             return current;
         }
+        case MNA_CUSTOM_NPOLE:
+            // For n-pole elements, current is not directly defined
+            // Return 0 or consider a callback approach if needed
+            return 0.0;
         default:
             return 0.0;
     }
@@ -1104,12 +1383,12 @@ double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
 
 double mna_get_component_voltage(MNASolver* solver, ComponentHandle handle) {
     if (handle < 0 || handle >= solver->num_components) return 0.0;
-
     Component* comp = &solver->components[handle];
     int n1 = comp->node1;
     int n2 = comp->node2;
-
     double v1 = (n1 > 0) ? mna_get_node_voltage(solver, n1) : 0.0;
     double v2 = (n2 > 0) ? mna_get_node_voltage(solver, n2) : 0.0;
     return v1 - v2;
 }
+
+#endif // MNA_SOLVER_V2_1_H
