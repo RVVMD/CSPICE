@@ -14,9 +14,13 @@
 #define MNA_MIN_CONDUCTANCE    1e-12
 #define MNA_MAX_CONDUCTANCE    1e12
 #define MNA_GROUND_CONDUCTANCE 1e-9
-#define TWO_PI                 6.28318530717958647692
+#define TWO_PI                 6.283185307179586476925286766559
 #define MNA_INIT_CAPACITY      4
-#define MNA_TRBDF2_GAMMA       (2.0 - 1.41421356237309504880)/8
+#define MNA_TRBDF2_GAMMA       0.5857864376269049511983112757903
+#define MNA_DAMPING_THRESHOLD  1
+#define MNA_DAMPING_STEEPNESS  1e3
+#define MNA_V_FLOOR            1e-9
+#define MNA_I_FLOOR            1e-9
 
 typedef enum {
     MNA_SUCCESS,
@@ -52,7 +56,6 @@ typedef enum {
 } ComponentType;
 
 typedef enum {
-    MNA_INTEGRATION_TRAPEZOIDAL,
     MNA_INTEGRATION_TRBDF2
 } IntegrationMethod;
 
@@ -98,11 +101,14 @@ typedef struct {
     double last_current;
     double prev_voltage;
     double prev_current;
+    double stage2_voltage;
+    double stage2_current;
     double stage1_voltage;
     double stage1_current;
     double last_conductance;
     double last_charge;
     double last_flux;
+    double smoothed_alpha;
     CustomNonlinearFunc nonlinear_func;
     void* user_data;
     double trans_G_eq;
@@ -121,6 +127,7 @@ typedef struct MNASolver {
     int num_nonlinear;
     int max_node_index;
     int transient_initialized;
+    int preserve_dc_state;
     double time;
     double dt;
     IntegrationMethod integration_method;
@@ -136,6 +143,7 @@ typedef struct MNASolver {
 void mna_destroy(MNASolver* solver);
 MNAStatus mna_init(MNASolver* solver);
 MNAStatus mna_set_integration_method(MNASolver* solver, IntegrationMethod method);
+MNAStatus mna_set_preserve_dc_state(MNASolver* solver, int enable);
 int mna_create_node(MNASolver* solver);
 MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, int node2,
                             double value, SourceType src_type, ComponentHandle* handle);
@@ -223,7 +231,8 @@ MNAStatus mna_init(MNASolver* solver) {
     memset(solver, 0, sizeof(MNASolver));
     solver->cap_components = MNA_INIT_CAPACITY;
     solver->matrix_cap_size = MNA_INIT_CAPACITY;
-    solver->integration_method = MNA_INTEGRATION_TRAPEZOIDAL;
+    solver->integration_method = MNA_INTEGRATION_TRBDF2;
+    solver->preserve_dc_state = 0;
     solver->components = (Component*)calloc((size_t)solver->cap_components, sizeof(Component));
     solver->A = (double*)calloc((size_t)solver->matrix_cap_size * (size_t)solver->matrix_cap_size, sizeof(double));
     solver->b = (double*)calloc((size_t)solver->matrix_cap_size, sizeof(double));
@@ -233,12 +242,6 @@ MNAStatus mna_init(MNASolver* solver) {
         mna_destroy(solver);
         return MNA_INSUFFICIENT_MEMORY;
     }
-    return MNA_SUCCESS;
-}
-
-MNAStatus mna_set_integration_method(MNASolver* solver, IntegrationMethod method) {
-    if (!solver) return MNA_INVALID_PARAMETER;
-    solver->integration_method = method;
     return MNA_SUCCESS;
 }
 
@@ -259,6 +262,12 @@ void mna_destroy(MNASolver* solver) {
     free(solver->x);
     free(solver->ac_solution);
     memset(solver, 0, sizeof(MNASolver));
+}
+
+MNAStatus mna_set_preserve_dc_state(MNASolver* solver, int enable) {
+    if (!solver) return MNA_INVALID_PARAMETER;
+    solver->preserve_dc_state = (enable != 0);
+    return MNA_SUCCESS;
 }
 
 int mna_create_node(MNASolver* solver) {
@@ -298,6 +307,7 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
     comp.value = value;
     comp.state = 1;
     comp.source_type = src_type;
+    comp.smoothed_alpha = 1.0;
     int index = solver->num_components++;
     solver->components[index] = comp;
     if (type == MNA_SOURCE && src_type == SOURCE_VOLTAGE) {
@@ -335,8 +345,8 @@ MNAStatus mna_add_switch(MNASolver* solver, int node1, int node2, double value, 
 }
 
 MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2, NonlinearType nl_type,
-                                   CustomNonlinearFunc func, void* user_data,
-                                   double initial_value1, double initial_value2, ComponentHandle* handle) {
+CustomNonlinearFunc func, void* user_data,
+double initial_value1, double initial_value2, ComponentHandle* handle) {
     if (!solver) return MNA_INVALID_HANDLE;
     MNAStatus status = mna_validate_nodes(solver, node1, node2);
     if (status != MNA_SUCCESS) return status;
@@ -354,6 +364,8 @@ MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2, Nonl
     comp.nonlinear_type = nl_type;
     comp.nonlinear_func = func;
     comp.user_data = user_data;
+    comp.smoothed_alpha = 1.0;
+
     if (nl_type == NONLINEAR_RESISTOR) comp.last_voltage = initial_value1;
     else if (nl_type == NONLINEAR_CAPACITOR) {
         comp.last_voltage = initial_value1;
@@ -367,6 +379,23 @@ MNAStatus mna_add_custom_nonlinear(MNASolver* solver, int node1, int node2, Nonl
     solver->num_nonlinear++;
     if (handle) *handle = index;
     return MNA_SUCCESS;
+}
+
+static double mna_compute_alpha(double rate, double prev_alpha) {
+    double target_alpha = 1.0;
+
+    if (rate >= MNA_DAMPING_THRESHOLD) {
+        double excess = rate - MNA_DAMPING_THRESHOLD;
+        target_alpha = exp(-MNA_DAMPING_STEEPNESS * excess);
+    }
+
+    double recovery_factor = 0.5;
+
+    if (target_alpha < prev_alpha) {
+        return target_alpha;
+    } else {
+        return prev_alpha + recovery_factor * (target_alpha - prev_alpha);
+    }
 }
 
 MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nodes,
@@ -423,6 +452,16 @@ MNAStatus mna_set_switch_state(MNASolver* solver, ComponentHandle handle, int st
     Component* comp = &solver->components[handle];
     if (comp->type == MNA_SWITCH) {
         comp->state = state;
+        for (int i = 0; i < solver->num_components; i++) {
+            Component* c = &solver->components[i];
+            if (c->type == MNA_CAPACITOR || c->type == MNA_INDUCTOR ||
+                c->type == MNA_CUSTOM_NONLINEAR) {
+                c->prev_voltage = c->last_voltage;
+                c->prev_current = c->last_current;
+                c->stage1_voltage = c->last_voltage;
+                c->stage1_current = c->last_current;
+            }
+        }
         return MNA_SUCCESS;
     }
     return MNA_INVALID_PARAMETER;
@@ -479,82 +518,86 @@ static void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index, int is
         .dt = solver->dt
     };
 
-    switch (comp->nonlinear_type) {
-    case NONLINEAR_RESISTOR: {
-        double current, conductance;
-        comp->nonlinear_func(&state, comp->user_data, &current, &conductance);
-        if (conductance < MNA_MIN_CONDUCTANCE) conductance = MNA_MIN_CONDUCTANCE;
-        if (conductance > MNA_MAX_CONDUCTANCE) conductance = MNA_MAX_CONDUCTANCE;
-        mna_stamp_conductance(solver, n1, n2, conductance);
-        mna_stamp_current_source(solver, n1, n2, (current - conductance * state.voltage));
-        break;
-    }
-    case NONLINEAR_CAPACITOR: {
-        if (is_dc) {
-            mna_stamp_conductance(solver, n1, n2, MNA_MIN_CONDUCTANCE);
-        } else {
-            double q0, C0;
-            comp->nonlinear_func(&state, comp->user_data, &q0, &C0);
-            double G_eq, I_eq;
-            double dt = solver->dt;
-            double v_n = comp->prev_voltage;
-            double gamma = MNA_TRBDF2_GAMMA;
+    double alpha = comp->smoothed_alpha;
 
-            if (solver->integration_method == MNA_INTEGRATION_TRBDF2) {
+    if (!is_dc && solver->dt > 0.0) {
+        double rate = 0.0;
+        if (comp->nonlinear_type == NONLINEAR_CAPACITOR || comp->nonlinear_type == NONLINEAR_RESISTOR) {
+            double dv = comp->last_voltage - comp->prev_voltage;
+            rate = fabs(dv) / solver->dt;
+        } else if (comp->nonlinear_type == NONLINEAR_INDUCTOR) {
+            double di = comp->last_current - comp->prev_current;
+            rate = fabs(di) / solver->dt;
+        }
+
+        alpha = mna_compute_alpha(rate, comp->smoothed_alpha);
+        comp->smoothed_alpha = alpha;
+    }
+
+    switch (comp->nonlinear_type) {
+        case NONLINEAR_RESISTOR: {
+            double current, conductance;
+            comp->nonlinear_func(&state, comp->user_data, &current, &conductance);
+            if (conductance < MNA_MIN_CONDUCTANCE) conductance = MNA_MIN_CONDUCTANCE;
+            if (conductance > MNA_MAX_CONDUCTANCE) conductance = MNA_MAX_CONDUCTANCE;
+            mna_stamp_conductance(solver, n1, n2, conductance);
+            mna_stamp_current_source(solver, n1, n2, (current - conductance * state.voltage));
+            break;
+        }
+        case NONLINEAR_CAPACITOR: {
+            if (is_dc) {
+                mna_stamp_conductance(solver, n1, n2, MNA_MIN_CONDUCTANCE);
+            } else {
+                double q0, C0;
+                comp->nonlinear_func(&state, comp->user_data, &q0, &C0);
+                double G_eq, I_eq;
+                double dt = solver->dt;
+                double v_n = comp->last_voltage;
+                double gamma = MNA_TRBDF2_GAMMA;
                 if (stage == 1) {
                     double h1 = gamma * dt;
                     G_eq = (2.0 * C0) / h1;
-                    I_eq = (G_eq * v_n) + state.current;
+                    I_eq = (G_eq * v_n);
                 } else {
                     double v_ng = comp->stage1_voltage;
                     G_eq = (C0 * (2.0 - gamma)) / (dt * (1.0 - gamma));
-                    I_eq = C0 * (((1.0 - gamma) / (dt * gamma)) * v_n -
-                                 (1.0 / (dt * gamma * (1.0 - gamma))) * v_ng);
+                    I_eq = (C0 / (dt * gamma * (1.0 - gamma))) * v_ng -
+                           (C0 * (1.0 - gamma) / (dt * gamma)) * v_n;
                 }
-            } else {
-                G_eq = (2.0 * C0) / dt;
-                I_eq = (G_eq * v_n) + state.current;
+                comp->trans_G_eq = G_eq;
+                comp->trans_I_eq = I_eq;
+                mna_stamp_conductance(solver, n1, n2, G_eq);
+                mna_stamp_current_source(solver, n1, n2, -I_eq);
             }
-            comp->trans_G_eq = G_eq;
-            comp->trans_I_eq = I_eq;
-            mna_stamp_conductance(solver, n1, n2, G_eq);
-            mna_stamp_current_source(solver, n1, n2, -I_eq);
+            break;
         }
-        break;
-    }
-    case NONLINEAR_INDUCTOR: {
-        if (is_dc) {
-            mna_stamp_conductance(solver, n1, n2, MNA_MAX_CONDUCTANCE);
-        } else {
-            double phi0, L0;
-            comp->nonlinear_func(&state, comp->user_data, &phi0, &L0);
-            double G_eq, I_eq;
-            double dt = solver->dt;
-            double i_n = comp->prev_current;
-            double gamma = MNA_TRBDF2_GAMMA;
-
-            if (solver->integration_method == MNA_INTEGRATION_TRBDF2) {
+        case NONLINEAR_INDUCTOR: {
+            if (is_dc) {
+                mna_stamp_conductance(solver, n1, n2, MNA_MAX_CONDUCTANCE);
+            } else {
+                double phi0, L0;
+                comp->nonlinear_func(&state, comp->user_data, &phi0, &L0);
+                double G_eq, I_eq;
+                double dt = solver->dt;
+                double i_n = comp->last_current;
+                double gamma = MNA_TRBDF2_GAMMA;
                 if (stage == 1) {
                     double h1 = gamma * dt;
                     G_eq = h1 / (2.0 * L0);
-                    I_eq = state.current + (G_eq * state.voltage);
+                    I_eq = i_n;
                 } else {
                     double i_ng = comp->stage1_current;
                     G_eq = (dt * (1.0 - gamma)) / (L0 * (2.0 - gamma));
                     I_eq = (1.0 / (gamma * (2.0 - gamma))) * i_ng -
                            (((1.0 - gamma) * (1.0 - gamma)) / (gamma * (2.0 - gamma))) * i_n;
                 }
-            } else {
-                G_eq = dt / (2.0 * L0);
-                I_eq = state.current + (G_eq * state.voltage);
+                comp->trans_G_eq = G_eq;
+                comp->trans_I_eq = I_eq;
+                mna_stamp_conductance(solver, n1, n2, G_eq);
+                mna_stamp_current_source(solver, n1, n2, I_eq);
             }
-            comp->trans_G_eq = G_eq;
-            comp->trans_I_eq = I_eq;
-            mna_stamp_conductance(solver, n1, n2, G_eq);
-            mna_stamp_current_source(solver, n1, n2, I_eq);
+            break;
         }
-        break;
-    }
     }
 }
 
@@ -902,7 +945,6 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
             break;
         }
         case MNA_CUSTOM_NPOLE: {
-            fprintf(stderr, "Warning: AC analysis for n-pole elements uses DC approximation\n");
             NPoleData* npole = comp->data.npole.npole_data;
             if (npole) npole->stamp_func(solver, npole->nodes, npole->num_nodes, npole->user_data, 0.0, 0.0);
             continue;
@@ -1053,187 +1095,205 @@ void mna_init_transient(MNASolver* solver) {
     if (!solver) return;
     solver->time = 0.0;
     solver->transient_initialized = 1;
-    mna_solve_initial_conditions(solver);
+
+    if (solver->preserve_dc_state) {
+        for (int i = 0; i < solver->num_components; i++) {
+            Component* comp = &solver->components[i];
+            int n1 = comp->node1;
+            int n2 = comp->node2;
+
+            double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
+            double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
+            double v_diff = v1 - v2;
+
+            comp->prev_voltage = v_diff;
+            comp->stage1_voltage = v_diff;
+            comp->last_voltage = v_diff;
+
+            if (comp->type == MNA_CAPACITOR) {
+                comp->last_current = 0.0;
+                comp->prev_current = 0.0;
+                comp->stage1_current = 0.0;
+            }
+            else if (comp->type == MNA_INDUCTOR) {
+                comp->last_current = 0.0;
+                comp->prev_current = 0.0;
+                comp->stage1_current = 0.0;
+            }
+        }
+    } else {
+        mna_solve_initial_conditions(solver);
+    }
 }
 
 MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
     if (!solver) return MNA_INVALID_HANDLE;
     solver->dt = dt;
     int matrix_size = mna_active_size(solver);
-    IntegrationMethod method = solver->integration_method;
-    int stages = (method == MNA_INTEGRATION_TRBDF2) ? 2 : 1;
-    double gamma = MNA_TRBDF2_GAMMA;
+    const int stages = 2;
+    const double gamma = MNA_TRBDF2_GAMMA;
 
+    double alpha_min = 1.0;
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
-        if (comp->type == MNA_CAPACITOR || comp->type == MNA_INDUCTOR ||
-            comp->type == MNA_CUSTOM_NONLINEAR) {
-            comp->prev_voltage = comp->last_voltage;
-            comp->prev_current = comp->last_current;
+        if (comp->smoothed_alpha < alpha_min) {
+            alpha_min = comp->smoothed_alpha;
+        }
+    }
+    
+    for (int iter = 0; iter < 1; iter++) {
+        for (int stage = 1; stage <= stages; stage++) {
+            mna_reset_system(solver);
+            int source_count = 0;
+            double h_eff = (stage == 1) ? (gamma * dt) : ((1.0 - gamma) * dt);
+
+            for (int i = 0; i < solver->num_components; i++) {
+                Component* comp = &solver->components[i];
+                int n1 = comp->node1;
+                int n2 = comp->node2;
+
+                switch (comp->type) {
+                    case MNA_CAPACITOR: {
+                        double G_eq, I_eq;
+                        double v_n = comp->last_voltage;
+                        double i_n = comp->last_current;
+                        if (stage == 1) {
+                            G_eq = (2.0 * comp->value) / h_eff;
+                            I_eq = (G_eq * v_n) + (i_n * alpha_min);
+                        } else {
+                            double v_ng = comp->stage1_voltage;
+                            G_eq = (comp->value * (2.0 - gamma)) / (dt * (1.0 - gamma));
+                            I_eq = (comp->value / (dt * gamma * (1.0 - gamma))) * v_ng -
+                                   (comp->value * (1.0 - gamma) / (dt * gamma)) * v_n;
+                        }
+                        comp->trans_G_eq = G_eq;
+                        comp->trans_I_eq = I_eq;
+                        mna_stamp_conductance(solver, n1, n2, G_eq);
+                        mna_stamp_current_source(solver, n1, n2, -I_eq);
+                        break;
+                    }
+                    case MNA_INDUCTOR: {
+                        double G_eq, I_eq;
+                        double v_n = comp->last_voltage;
+                        double i_n = comp->last_current;
+                        if (stage == 1) {
+                            G_eq = h_eff / (2.0 * comp->value);
+                            I_eq = i_n + (G_eq * v_n * alpha_min);
+                        } else {
+                            double i_ng = comp->stage1_current;
+                            G_eq = (dt * (1.0 - gamma)) / (comp->value * (2.0 - gamma));
+                            I_eq = (1.0 / (gamma * (2.0 - gamma))) * i_ng -
+                                   (((1.0 - gamma) * (1.0 - gamma)) / (gamma * (2.0 - gamma))) * i_n;
+                        }
+                        comp->trans_G_eq = G_eq;
+                        comp->trans_I_eq = I_eq;
+                        mna_stamp_conductance(solver, n1, n2, G_eq);
+                        mna_stamp_current_source(solver, n1, n2, I_eq);
+                        break;
+                    }
+                    case MNA_RESISTOR: {
+                        double g = 1.0 / comp->value;
+                        mna_stamp_conductance(solver, n1, n2, g);
+                        break;
+                    }
+                    case MNA_SOURCE: {
+                        if (comp->source_type == SOURCE_VOLTAGE) {
+                            mna_stamp_voltage_source(solver, i, source_count++);
+                        } else {
+                            mna_stamp_current_source(solver, n1, n2, comp->value);
+                        }
+                        break;
+                    }
+                    case MNA_SWITCH: {
+                        double g = comp->state ? 1.0 / comp->value : MNA_MIN_CONDUCTANCE;
+                        mna_stamp_conductance(solver, n1, n2, g);
+                        break;
+                    }
+                    case MNA_CUSTOM_NONLINEAR: {
+                        mna_stamp_custom_nonlinear(solver, i, 0, stage);
+                        break;
+                    }
+                    case MNA_CUSTOM_NPOLE: {
+                        NPoleData* npole = comp->data.npole.npole_data;
+                        if (npole) {
+                            npole->stamp_func(solver, npole->nodes, npole->num_nodes,
+                                              npole->user_data, solver->time, dt);
+                        }
+                        break;
+                    }
+                    default: break;
+                }
+            }
+
+            MNAStatus status = mna_solve_linear_system(solver, matrix_size);
+            if (status != MNA_SUCCESS) return status;
+
+            for (int i = 0; i < solver->num_components; i++) {
+                Component* comp = &solver->components[i];
+                int n1 = comp->node1;
+                int n2 = comp->node2;
+                double v1 = (n1 > 0) ? solver->x[n1 - 1] : 0.0;
+                double v2 = (n2 > 0) ? solver->x[n2 - 1] : 0.0;
+                double v = v1 - v2;
+
+                if (comp->type == MNA_CAPACITOR) {
+                    double i = comp->trans_G_eq * v - comp->trans_I_eq;
+                    if (stage == 1) {
+                        comp->stage1_voltage = v;
+                        comp->stage1_current = i;
+                    } else {
+                        comp->last_voltage = v;
+                        comp->last_current = i;
+                    }
+                } else if (comp->type == MNA_INDUCTOR) {
+                    double i = comp->trans_G_eq * v + comp->trans_I_eq;
+                    if (stage == 1) {
+                        comp->stage1_voltage = v;
+                        comp->stage1_current = i;
+                    } else {
+                        comp->last_voltage = v;
+                        comp->last_current = i;
+                    }
+                } else {
+                    if (stage == 1) comp->stage1_voltage = v;
+                    else comp->last_voltage = v;
+                }
+            }
         }
     }
 
-    for (int stage = 1; stage <= stages; stage++) {
-        mna_reset_system(solver);
-        int source_count = 0;
-        double h_eff = (stage == 1) ? (gamma * dt) : ((1.0 - gamma) * dt);
+    for (int i = 0; i < solver->num_components; i++) {
+        Component* comp = &solver->components[i];
+        double rate = 0.0;
 
-        for (int i = 0; i < solver->num_components; i++) {
-            Component* comp = &solver->components[i];
-            int n1 = comp->node1;
-            int n2 = comp->node2;
-
-            switch (comp->type) {
-            case MNA_RESISTOR: {
-                double g = 1.0 / comp->value;
-                mna_stamp_conductance(solver, n1, n2, g);
-                break;
-            }
-            case MNA_CAPACITOR: {
-                double G_eq, I_eq;
-                double v_n = comp->prev_voltage;
-                double i_n = comp->last_current;
-
-                if (method == MNA_INTEGRATION_TRBDF2) {
-                    if (stage == 1) {
-                        G_eq = (2.0 * comp->value) / h_eff;
-                        I_eq = (G_eq * v_n) + i_n;
-                    } else {
-                        double v_ng = comp->stage1_voltage;
-                        G_eq = (comp->value * (2.0 - gamma)) / (dt * (1.0 - gamma));
-                        I_eq = (G_eq * v_ng) + comp->stage1_current -
-                               (comp->value / (dt * gamma * (1.0 - gamma))) * (v_ng - v_n);
-                    }
-                } else {
-                    G_eq = (2.0 * comp->value) / dt;
-                    I_eq = (G_eq * v_n) + i_n;
-                }
-                comp->trans_G_eq = G_eq;
-                comp->trans_I_eq = I_eq;
-                mna_stamp_conductance(solver, n1, n2, G_eq);
-                mna_stamp_current_source(solver, n1, n2, -I_eq);
-                break;
-            }
-            case MNA_INDUCTOR: {
-                double G_eq, I_eq;
-                double i_n = comp->prev_current;
-                double v_n = comp->last_voltage;
-
-                if (method == MNA_INTEGRATION_TRBDF2) {
-                    if (stage == 1) {
-                        G_eq = h_eff / (2.0 * comp->value);
-                        I_eq = i_n + (G_eq * v_n);
-                    } else {
-                        double i_ng = comp->stage1_current;
-                        G_eq = (dt * (1.0 - gamma)) / (comp->value * (2.0 - gamma));
-                        I_eq = i_ng + (G_eq * comp->stage1_voltage) -
-                               ((1.0 - gamma) / (gamma * (2.0 - gamma))) * (i_ng - i_n);
-                    }
-                } else {
-                    G_eq = dt / (2.0 * comp->value);
-                    I_eq = i_n + (G_eq * v_n);
-                }
-                comp->trans_G_eq = G_eq;
-                comp->trans_I_eq = I_eq;
-                mna_stamp_conductance(solver, n1, n2, G_eq);
-                mna_stamp_current_source(solver, n1, n2, I_eq);
-                break;
-            }
-            case MNA_SOURCE: {
-                if (comp->source_type == SOURCE_VOLTAGE) {
-                    mna_stamp_voltage_source(solver, i, source_count++);
-                } else {
-                    mna_stamp_current_source(solver, n1, n2, comp->value);
-                }
-                break;
-            }
-            case MNA_CUSTOM_NONLINEAR: {
-                mna_stamp_custom_nonlinear(solver, i, 0, stage);
-                break;
-            }
-            case MNA_CUSTOM_NPOLE: {
-                NPoleData* npole = comp->data.npole.npole_data;
-                if (npole) {
-                    npole->stamp_func(solver, npole->nodes, npole->num_nodes,
-                                      npole->user_data, solver->time, dt);
-                }
-                break;
-            }
-            case MNA_SWITCH: {
-                double g = comp->state ? 1.0 / comp->value : MNA_MIN_CONDUCTANCE;
-                mna_stamp_conductance(solver, n1, n2, g);
-                break;
-            }
-            default: break;
+        if (comp->type == MNA_CAPACITOR) {
+            double dv = comp->last_voltage - comp->prev_voltage;
+            double v_ref = fmax(fabs(comp->last_voltage), fabs(comp->prev_voltage));
+            rate = fabs(dv) / (v_ref + MNA_V_FLOOR);
+        } else if (comp->type == MNA_INDUCTOR) {
+            double di = comp->last_current - comp->prev_current;
+            double i_ref = fmax(fabs(comp->last_current), fabs(comp->prev_current));
+            rate = fabs(di) / (i_ref + MNA_I_FLOOR);
+        } else if (comp->type == MNA_CUSTOM_NONLINEAR) {
+            if (comp->nonlinear_type == NONLINEAR_INDUCTOR) {
+                double di = comp->last_current - comp->prev_current;
+                double i_ref = fmax(fabs(comp->last_current), fabs(comp->prev_current));
+                rate = fabs(di) / (i_ref + MNA_I_FLOOR);
+            } else {
+                double dv = comp->last_voltage - comp->prev_voltage;
+                double v_ref = fmax(fabs(comp->last_voltage), fabs(comp->prev_voltage));
+                rate = fabs(dv) / (v_ref + MNA_V_FLOOR);
             }
         }
 
-        MNAStatus status = mna_solve_linear_system(solver, matrix_size);
-        if (status != MNA_SUCCESS) return status;
+        double alpha = mna_compute_alpha(rate, comp->smoothed_alpha);
+        comp->smoothed_alpha = alpha;
+    }
 
-        for (int i = 0; i < solver->num_components; i++) {
-            Component* comp = &solver->components[i];
-            int n1 = comp->node1;
-            int n2 = comp->node2;
-            double v1 = (n1 > 0) ? solver->x[n1-1] : 0.0;
-            double v2 = (n2 > 0) ? solver->x[n2-1] : 0.0;
-            double v = v1 - v2;
-
-            switch (comp->type) {
-            case MNA_CAPACITOR:
-                if (method == MNA_INTEGRATION_TRBDF2) {
-                    double i = comp->trans_G_eq * v + comp->trans_I_eq;
-                    if (stage == 1) {
-                        comp->stage1_voltage = v;
-                        comp->stage1_current = i;
-                    } else {
-                        comp->last_voltage = v;
-                        comp->last_current = i;
-                    }
-                } else {
-                    comp->last_voltage = v;
-                    comp->last_current = ((2.0 * comp->value) / dt) * (v - comp->prev_voltage) - comp->last_current;
-                }
-                break;
-            case MNA_INDUCTOR:
-                if (method == MNA_INTEGRATION_TRBDF2) {
-                    double i = comp->trans_G_eq * v + comp->trans_I_eq;
-                    if (stage == 1) {
-                        comp->stage1_voltage = v;
-                        comp->stage1_current = i;
-                    } else {
-                        comp->last_voltage = v;
-                        comp->last_current = i;
-                    }
-                } else {
-                    comp->last_voltage = v;
-                    comp->last_current += (dt / (2.0 * comp->value)) * (v + comp->prev_voltage);
-                }
-                break;
-            case MNA_CUSTOM_NONLINEAR:
-                if (method == MNA_INTEGRATION_TRBDF2) {
-                    if (comp->nonlinear_type == NONLINEAR_CAPACITOR ||
-                        comp->nonlinear_type == NONLINEAR_INDUCTOR) {
-                        double i = comp->trans_G_eq * v + comp->trans_I_eq;
-                        if (stage == 1) {
-                            comp->stage1_voltage = v;
-                            comp->stage1_current = i;
-                        } else {
-                            comp->last_voltage = v;
-                            comp->last_current = i;
-                        }
-                    } else {
-                        comp->last_voltage = v;
-                    }
-                } else {
-                    comp->last_voltage = v;
-                }
-                break;
-            default:
-                comp->last_voltage = v;
-                break;
-            }
-        }
+    for (int i = 0; i < solver->num_components; i++) {
+        Component* comp = &solver->components[i];
+        comp->prev_voltage = comp->last_voltage;
+        comp->prev_current = comp->last_current;
     }
 
     solver->time += dt;
@@ -1262,7 +1322,7 @@ double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
     case MNA_RESISTOR: return v / comp->value;
     case MNA_CAPACITOR:
         if (!solver->transient_initialized || solver->dt == 0.0) return 0.0;
-        return (v - comp->prev_voltage) * (comp->value / solver->dt);
+        return comp->last_current;
     case MNA_INDUCTOR: return comp->last_current;
     case MNA_SOURCE:
         if (comp->source_type == SOURCE_VOLTAGE) {
