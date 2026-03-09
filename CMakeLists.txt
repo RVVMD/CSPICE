@@ -22,6 +22,11 @@ set(MNA_SOURCES
     elements/nonlinear/nonlinear.c
 )
 
+set(CLI_SOURCES
+    src/cli/netlist.c
+    src/cli/cspice_cli.c
+)
+
 set(MNA_HEADERS
     include/types.h
     include/matrix.h
@@ -33,6 +38,7 @@ set(MNA_HEADERS
     elements/sources.h
     elements/nonlinear/nonlinear.h
     mna_solver.h
+    src/cli/netlist.h
 )
 
 # ============================================================================
@@ -86,6 +92,21 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/TR5_sim.c")
         RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
     )
 endif()
+
+# ============================================================================
+# CLI Executable
+# ============================================================================
+add_executable(cspice ${CLI_SOURCES})
+target_include_directories(cspice PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/elements
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(cspice PRIVATE mna_solver_static ${MATH_LIBRARY})
+set_target_properties(cspice PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
 
 # ============================================================================
 # Installation

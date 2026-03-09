@@ -1,0 +1,18 @@
+* CSPICE Example: RC Circuit Transient Response
+* Simple RC circuit to demonstrate CLI usage
+
+* Circuit: Voltage source -> Resistor -> Capacitor -> Ground
+V1 1 0 DC 10
+R1 1 2 1k
+C1 2 0 1u
+
+* Analysis: Transient from 0 to 5ms with 10us step
+.analysis tran 10u 5m
+
+* Output: Voltage at node 2 (capacitor voltage)
+.print v(2)
+
+* Write results to CSV
+.write rc_transient.csv
+
+.end
