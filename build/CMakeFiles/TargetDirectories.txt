@@ -1,9 +1,0 @@
-/home/alex/CSPICE/build/CMakeFiles/mna_solver_static.dir
-/home/alex/CSPICE/build/CMakeFiles/mna_solver_shared.dir
-/home/alex/CSPICE/build/CMakeFiles/cspice.dir
-/home/alex/CSPICE/build/CMakeFiles/edit_cache.dir
-/home/alex/CSPICE/build/CMakeFiles/rebuild_cache.dir
-/home/alex/CSPICE/build/CMakeFiles/list_install_components.dir
-/home/alex/CSPICE/build/CMakeFiles/install.dir
-/home/alex/CSPICE/build/CMakeFiles/install/local.dir
-/home/alex/CSPICE/build/CMakeFiles/install/strip.dir

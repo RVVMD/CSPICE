@@ -11,10 +11,26 @@ extern "C" {
 #define MNA_NETLIST_MAX_NAME 32
 #define MNA_NETLIST_MAX_NODES 256
 #define MNA_NETLIST_MAX_OUTPUTS 64
+#define MNA_NETLIST_MAX_SWITCH_EVENTS 32
+#define MNA_NETLIST_MAX_MODELS 16
 
-/* ============================================================================
- * Analysis Types
- * ============================================================================ */
+typedef struct {
+    double time;
+    char name[MNA_NETLIST_MAX_NAME];
+    int state;
+    int component_idx;
+    int valid;
+} SwitchEvent;
+
+typedef struct {
+    char name[MNA_NETLIST_MAX_NAME];
+    double Is;
+    double n;
+    double BV;
+    double IBV;
+    int valid;
+} DiodeModel;
+
 typedef enum {
     MNA_ANALYSIS_NONE,
     MNA_ANALYSIS_DC,
@@ -22,42 +38,32 @@ typedef enum {
     MNA_ANALYSIS_TRAN
 } AnalysisType;
 
-/* ============================================================================
- * Output Variable Types
- * ============================================================================ */
 typedef enum {
     MNA_OUTPUT_VOLTAGE,
     MNA_OUTPUT_CURRENT
 } OutputType;
 
-/* ============================================================================
- * Output Variable Specification
- * ============================================================================ */
 typedef struct {
     OutputType type;
-    char name[MNA_NETLIST_MAX_NAME];  /* Component name for currents */
-    int node;                          /* Node for voltages */
+    char name[MNA_NETLIST_MAX_NAME];
+    int node;
 } OutputVar;
 
-/* ============================================================================
- * Analysis Configuration
- * ============================================================================ */
 typedef struct {
     AnalysisType type;
-    /* DC */
     int dc_enabled;
-    /* AC */
     double ac_freq;
     int ac_enabled;
-    /* Transient */
     double tran_dt;
     double tran_end;
     int tran_enabled;
+    double sin_freq;
+    int sin_source_idx;
+    int sin_source_valid;
+    SwitchEvent switch_events[MNA_NETLIST_MAX_SWITCH_EVENTS];
+    int num_switch_events;
 } AnalysisConfig;
 
-/* ============================================================================
- * Netlist Parser Context
- * ============================================================================ */
 typedef struct {
     MNASolver* solver;
     AnalysisConfig analysis;
@@ -65,53 +71,21 @@ typedef struct {
     int num_outputs;
     char output_file[256];
     int write_enabled;
-    /* Node mapping: netlist node index -> solver node index */
     int node_map[MNA_NETLIST_MAX_NODES];
     int max_node_index;
-    /* Error tracking */
+    char switch_names[MNA_NETLIST_MAX_SWITCH_EVENTS][MNA_NETLIST_MAX_NAME];
+    int switch_indices[MNA_NETLIST_MAX_SWITCH_EVENTS];
+    int num_switches;
+    DiodeModel diode_models[MNA_NETLIST_MAX_MODELS];
+    int num_diode_models;
     int error_line;
     char error_msg[256];
 } NetlistContext;
 
-/* ============================================================================
- * Parser Functions
- * ============================================================================ */
-
-/**
- * @brief Initialize a netlist context
- * @param ctx Netlist context to initialize
- * @param solver MNA solver instance
- * @return MNAStatus indicating success or failure
- */
 MNAStatus netlist_init(NetlistContext* ctx, MNASolver* solver);
-
-/**
- * @brief Parse and execute a netlist file
- * @param ctx Netlist context
- * @param filename Path to the netlist file
- * @return MNAStatus indicating success or failure
- */
 MNAStatus netlist_parse_file(NetlistContext* ctx, const char* filename);
-
-/**
- * @brief Parse a netlist from a string
- * @param ctx Netlist context
- * @param content Netlist content as string
- * @return MNAStatus indicating success or failure
- */
 MNAStatus netlist_parse_string(NetlistContext* ctx, const char* content);
-
-/**
- * @brief Run the configured analysis
- * @param ctx Netlist context
- * @return MNAStatus indicating success or failure
- */
 MNAStatus netlist_run_analysis(NetlistContext* ctx);
-
-/**
- * @brief Free resources in netlist context
- * @param ctx Netlist context
- */
 void netlist_destroy(NetlistContext* ctx);
 
 #ifdef __cplusplus

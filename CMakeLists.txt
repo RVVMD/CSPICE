@@ -5,12 +5,8 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-# Math library (required for complex.h and math functions)
 find_library(MATH_LIBRARY m)
 
-# ============================================================================
-# Library Sources
-# ============================================================================
 set(MNA_SOURCES
     src/matrix.c
     src/solver/core.c
@@ -20,6 +16,7 @@ set(MNA_SOURCES
     elements/passive.c
     elements/sources.c
     elements/nonlinear/nonlinear.c
+    elements/transformer.c
 )
 
 set(CLI_SOURCES
@@ -37,13 +34,11 @@ set(MNA_HEADERS
     elements/passive.h
     elements/sources.h
     elements/nonlinear/nonlinear.h
+    elements/transformer.h
     mna_solver.h
     src/cli/netlist.h
 )
 
-# ============================================================================
-# Static Library
-# ============================================================================
 add_library(mna_solver_static STATIC ${MNA_SOURCES})
 target_include_directories(mna_solver_static PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -58,9 +53,6 @@ set_target_properties(mna_solver_static PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
-# ============================================================================
-# Shared Library
-# ============================================================================
 add_library(mna_solver_shared SHARED ${MNA_SOURCES})
 target_include_directories(mna_solver_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -76,9 +68,6 @@ set_target_properties(mna_solver_shared PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
-# ============================================================================
-# Example/Test Executable (if TR5_sim.c exists)
-# ============================================================================
 if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/TR5_sim.c")
     add_executable(tr5_sim TR5_sim.c)
     target_include_directories(tr5_sim PRIVATE
@@ -93,9 +82,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/TR5_sim.c")
     )
 endif()
 
-# ============================================================================
-# CLI Executable
-# ============================================================================
 add_executable(cspice ${CLI_SOURCES})
 target_include_directories(cspice PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -108,9 +94,6 @@ set_target_properties(cspice PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-# ============================================================================
-# Installation
-# ============================================================================
 install(TARGETS mna_solver_static mna_solver_shared
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
@@ -120,9 +103,6 @@ install(FILES ${MNA_HEADERS}
     DESTINATION include/mna_solver
 )
 
-# ============================================================================
-# Print Configuration
-# ============================================================================
 message(STATUS "MNA Solver Version: ${PROJECT_VERSION}")
 message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
 message(STATUS "Math Library: ${MATH_LIBRARY}")

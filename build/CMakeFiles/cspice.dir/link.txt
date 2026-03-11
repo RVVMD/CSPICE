@@ -1,1 +1,0 @@
-/usr/bin/cc -g CMakeFiles/cspice.dir/src/cli/netlist.c.o CMakeFiles/cspice.dir/src/cli/cspice_cli.c.o -o bin/cspice  lib/libmna_solver.a -lm 

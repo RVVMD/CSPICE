@@ -8,9 +8,6 @@
 #include <string.h>
 #include <stdbool.h>
 
-/* ============================================================================
- * Constants
- * ============================================================================ */
 #define MNA_MAX_ITER           50
 #define MNA_RELTOL             1e-6
 #define MNA_ABSTOL             1e-9
@@ -26,9 +23,6 @@
 #define MNA_V_FLOOR            1e-9
 #define MNA_I_FLOOR            1e-9
 
-/* ============================================================================
- * Status Codes
- * ============================================================================ */
 typedef enum {
     MNA_SUCCESS,
     MNA_MATRIX_SINGULAR,
@@ -39,9 +33,6 @@ typedef enum {
     MNA_INVALID_PARAMETER
 } MNAStatus;
 
-/* ============================================================================
- * Component Types
- * ============================================================================ */
 typedef enum {
     MNA_RESISTOR,
     MNA_CAPACITOR,
@@ -52,33 +43,21 @@ typedef enum {
     MNA_CUSTOM_NPOLE
 } ComponentType;
 
-/* ============================================================================
- * Nonlinear Element Types
- * ============================================================================ */
 typedef enum {
     NONLINEAR_RESISTOR,
     NONLINEAR_CAPACITOR,
     NONLINEAR_INDUCTOR
 } NonlinearType;
 
-/* ============================================================================
- * Source Types
- * ============================================================================ */
 typedef enum {
     SOURCE_VOLTAGE,
     SOURCE_CURRENT
 } SourceType;
 
-/* ============================================================================
- * Integration Methods
- * ============================================================================ */
 typedef enum {
     MNA_INTEGRATION_TRBDF2
 } IntegrationMethod;
 
-/* ============================================================================
- * Component State
- * ============================================================================ */
 typedef struct {
     double voltage;
     double current;
@@ -87,16 +66,10 @@ typedef struct {
     double dt;
 } ComponentState;
 
-/* ============================================================================
- * Forward Declarations
- * ============================================================================ */
 struct MNASolver;
 typedef struct MNASolver MNASolver;
 typedef int ComponentHandle;
 
-/* ============================================================================
- * Function Pointer Types
- * ============================================================================ */
 typedef void (*CustomNonlinearFunc)(const ComponentState* state, void* user_data,
                                     double* value1, double* value2);
 
@@ -107,20 +80,16 @@ typedef void (*NPoleStampFunc)(struct MNASolver* solver,
                                double time,
                                double dt);
 
-/* ============================================================================
- * N-Pole Data Structure
- * ============================================================================ */
 typedef struct {
     int* nodes;
     int num_nodes;
     NPoleStampFunc stamp_func;
     void* user_data;
     double* last_values;
+    int num_branch_currents;
+    int* branch_current_indices;
 } NPoleData;
 
-/* ============================================================================
- * Component Structure
- * ============================================================================ */
 typedef struct {
     ComponentType type;
     int node1;
@@ -155,9 +124,6 @@ typedef struct {
     } data;
 } Component;
 
-/* ============================================================================
- * MNA Solver Structure
- * ============================================================================ */
 struct MNASolver {
     int num_nodes;
     int num_components;

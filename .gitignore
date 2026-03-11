@@ -1,0 +1,40 @@
+# Compiled objects
+*.o
+
+# Libraries
+*.a
+*.so
+*.so.*
+*.dylib
+*.dll
+
+# Executables
+*.exe
+*.out
+*.app
+tr5_sim
+cspice
+
+# CMake build directory
+build/
+CMakeCache.txt
+cmake_install.cmake
+Makefile
+
+# Backup files
+*.bak
+*~
+backup/
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# OS files
+.DS_Store
+Thumbs.db
+
+# CSV output files (simulation results)
+*.csv
