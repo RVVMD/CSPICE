@@ -44,7 +44,7 @@ static MNAStatus mna_solve_dc_linear(MNASolver* solver) {
                 NPoleData* npole = comp->data.npole.npole_data;
                 if (npole) {
                     npole->stamp_func(solver, npole->nodes, npole->num_nodes,
-                                      npole->user_data, 0.0, 0.0);
+                                      npole->user_data, 0.0, 0.0, 0);
                 }
                 break;
             }
@@ -149,7 +149,7 @@ static MNAStatus mna_solve_dc_nonlinear(MNASolver* solver) {
                         NPoleData* npole = comp->data.npole.npole_data;
                         if (npole) {
                             npole->stamp_func(solver, npole->nodes, npole->num_nodes,
-                                              npole->user_data, 0.0, 0.0);
+                                              npole->user_data, 0.0, 0.0, 0);
                         }
                         break;
                     }

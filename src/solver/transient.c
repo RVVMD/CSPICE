@@ -139,6 +139,13 @@ static void mna_solve_initial_conditions(MNASolver* solver) {
                 xf_data->phi = 0.0;
                 xf_data->prev_phi = 0.0;
                 xf_data->i_mag = 0.0;
+                /* Initialize history voltages from DC solution */
+                int p1 = comp->data.npole.npole_data->nodes[0];
+                int p2 = comp->data.npole.npole_data->nodes[1];
+                double v1 = (p1 > 0) ? solver->x[p1 - 1] : 0.0;
+                double v2 = (p2 > 0) ? solver->x[p2 - 1] : 0.0;
+                xf_data->v_primary_n = v1 - v2;
+                xf_data->v_primary_stage1 = v1 - v2;
             }
         }
     }
@@ -282,7 +289,7 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                     NPoleData* npole = comp->data.npole.npole_data;
                     if (npole) {
                         npole->stamp_func(solver, npole->nodes, npole->num_nodes,
-                                          npole->user_data, solver->time, dt);
+                                          npole->user_data, solver->time, dt, stage);
                     }
                     break;
                 }
@@ -321,6 +328,9 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                     comp->last_voltage = v;
                     comp->last_current = i;
                 }
+            } else if (comp->type == MNA_CUSTOM_NPOLE) {
+                /* Post-solve flux update for voltage transformers */
+                mna_transformer_update_flux(solver, comp, stage, dt);
             } else {
                 if (stage == 1) {
                     comp->stage1_voltage = v;

@@ -440,21 +440,26 @@ static MNAStatus parse_transformer(NetlistContext* ctx, const char* line, int li
         return report_error(ctx, line_num, "Failed to create nodes for transformer");
     }
 
-    MNAStatus status;
-    if (Lm > 0 && Isat > 0) {
-        status = mna_add_transformer_with_saturation(ctx->solver,
-                                                      n_p1, n_p2, n_s1, n_s2,
-                                                      ratio, Lm, Isat, sat_factor,
-                                                      &handle);
-    } else if (Lm > 0) {
-        status = mna_add_voltage_transformer(ctx->solver,
-                                              n_p1, n_p2, n_s1, n_s2,
-                                              ratio, Lm, &handle);
-    } else {
-        status = mna_add_ideal_transformer(ctx->solver,
+    /* Build configuration for unified transformer */
+    TransformerConfig config = {0};
+    config.mode = TRANSFORMER_MODE_VOLTAGE;
+    config.turns_ratio = ratio;
+    config.Lm = Lm;
+    config.bh_curve = NULL;
+    config.Rc = 0.0;
+    config.hysteresis_coeff = 0.0;
+    config.eddy_current_coeff = 0.0;
+    config.core_area = 0.0;
+    config.magnetic_path_length = 0.0;
+    config.N_primary = 1;
+    config.N_secondary = (int)(ratio > 0 ? ratio : 1);
+    config.burden_resistance = 0.0;
+    config.initial_flux = 0.0;
+    config.initial_current = 0.0;
+
+    MNAStatus status = mna_add_transformer(ctx->solver,
                                             n_p1, n_p2, n_s1, n_s2,
-                                            ratio, &handle);
-    }
+                                            &config, &handle);
 
     if (status != MNA_SUCCESS) {
         return report_error(ctx, line_num, "Failed to add transformer");

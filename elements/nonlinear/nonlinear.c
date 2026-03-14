@@ -251,3 +251,46 @@ void mna_stamp_custom_nonlinear(MNASolver* solver, int comp_index, int is_dc, in
         }
     }
 }
+
+/* ============================================================================
+ * N-Pole Element Query Utilities
+ * ============================================================================ */
+
+double mna_get_npole_node_voltage(MNASolver* solver, ComponentHandle handle,
+                                   int terminal_index) {
+    if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
+
+    Component* comp = &solver->components[handle];
+    if (comp->type != MNA_CUSTOM_NPOLE) return 0.0;
+
+    NPoleData* npole = comp->data.npole.npole_data;
+    if (!npole || terminal_index < 0 || terminal_index >= npole->num_nodes) return 0.0;
+
+    int node = npole->nodes[terminal_index];
+    if (node <= 0) return 0.0;  /* Ground or invalid node */
+
+    return solver->x[node - 1];
+}
+
+double mna_get_npole_terminal_voltage_diff(MNASolver* solver, ComponentHandle handle,
+                                            int positive_terminal, int negative_terminal) {
+    double v_pos = mna_get_npole_node_voltage(solver, handle, positive_terminal);
+    double v_neg = mna_get_npole_node_voltage(solver, handle, negative_terminal);
+    return v_pos - v_neg;
+}
+
+double mna_get_npole_branch_current(MNASolver* solver, ComponentHandle handle,
+                                     int branch_index) {
+    if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
+
+    Component* comp = &solver->components[handle];
+    if (comp->type != MNA_CUSTOM_NPOLE) return 0.0;
+
+    NPoleData* npole = comp->data.npole.npole_data;
+    if (!npole || branch_index < 0 || branch_index >= npole->num_branch_currents) return 0.0;
+
+    int idx = npole->branch_current_indices[branch_index];
+    if (idx <= 0) return 0.0;  /* Invalid index */
+
+    return solver->x[idx - 1];
+}

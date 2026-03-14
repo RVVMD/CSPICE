@@ -78,7 +78,8 @@ typedef void (*NPoleStampFunc)(struct MNASolver* solver,
                                int num_nodes,
                                void* user_data,
                                double time,
-                               double dt);
+                               double dt,
+                               int stage);
 
 typedef struct {
     int* nodes;
