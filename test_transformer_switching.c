@@ -227,7 +227,7 @@ int main(void) {
 
         /* Cycle 1 - energize at voltage peak (t=7.5ms = 1/4 cycle) */
         if (t_ms >= 7.5 && t_ms < 200.0) s1_state = 1;   /* S1: 7.5-200ms */
-        if (t_ms >= 50.0 && t_ms < 150.0) s2_state = 1;   /* S2: 50-150ms */
+        if (t_ms >= 50.0 && t_ms < 152.5) s2_state = 1;   /* S2: 50-150ms */
 
         /* Cycle 2 - energize at voltage negative peak (t=207.5ms = 1.25 cycles) */
         if (t_ms >= 207.5 && t_ms < 400.0) s1_state = 1;  /* S1: 207.5-400ms */
