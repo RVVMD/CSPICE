@@ -36,5 +36,6 @@ backup/
 .DS_Store
 Thumbs.db
 
+
 # CSV output files (simulation results)
-*.csv
+#*.csv
