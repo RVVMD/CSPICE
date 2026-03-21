@@ -55,7 +55,7 @@ double mna_get_npole_terminal_voltage_diff(MNASolver* solver, ComponentHandle ha
 /**
  * Get branch current for an n-pole element
  * 
- * N-pole elements can have multiple branch currents (e.g., transformer has
+ * N-pole elements can have multiple branch currents
  * one for the ideal constraint). This function retrieves the current at
  * the specified branch index.
  * 

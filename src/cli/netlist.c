@@ -6,7 +6,6 @@
 #include "../../elements/passive.h"
 #include "../../elements/sources.h"
 #include "../../elements/nonlinear/nonlinear.h"
-#include "../../elements/transformer.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
@@ -393,81 +392,6 @@ static MNAStatus parse_switch_cmd(NetlistContext* ctx, const char* line, int lin
     return MNA_SUCCESS;
 }
 
-static MNAStatus parse_transformer(NetlistContext* ctx, const char* line, int line_num) {
-    char name[MNA_NETLIST_MAX_NAME], token[64];
-    int node_p1, node_p2, node_s1, node_s2;
-    double ratio, Lm = 0.0, Isat = 0.0, sat_factor = 1.0;
-    ComponentHandle handle;
-    const char* p = line + 1;
-
-    parse_token(&p, name, sizeof(name));
-    parse_token(&p, token, sizeof(token));
-    node_p1 = atoi(token);
-    parse_token(&p, token, sizeof(token));
-    node_p2 = atoi(token);
-    parse_token(&p, token, sizeof(token));
-    node_s1 = atoi(token);
-    parse_token(&p, token, sizeof(token));
-    node_s2 = atoi(token);
-
-    skip_whitespace(&p);
-    if (!*p || *p == ';' || *p == '\n') {
-        return report_error(ctx, line_num, "Transformer requires turns ratio");
-    }
-    ratio = parse_value(&p);
-
-    skip_whitespace(&p);
-    if (*p && *p != ';' && *p != '\n' && isdigit((unsigned char)*p)) {
-        Lm = parse_value(&p);
-
-        skip_whitespace(&p);
-        if (*p && *p != ';' && *p != '\n' && isdigit((unsigned char)*p)) {
-            Isat = parse_value(&p);
-
-            skip_whitespace(&p);
-            if (*p && *p != ';' && *p != '\n' && isdigit((unsigned char)*p)) {
-                sat_factor = parse_value(&p);
-            }
-        }
-    }
-
-    int n_p1 = get_or_create_node(ctx, node_p1);
-    int n_p2 = get_or_create_node(ctx, node_p2);
-    int n_s1 = get_or_create_node(ctx, node_s1);
-    int n_s2 = get_or_create_node(ctx, node_s2);
-
-    if (n_p1 < 0 || n_p2 < 0 || n_s1 < 0 || n_s2 < 0) {
-        return report_error(ctx, line_num, "Failed to create nodes for transformer");
-    }
-
-    /* Build configuration for unified transformer */
-    TransformerConfig config = {0};
-    config.mode = TRANSFORMER_MODE_VOLTAGE;
-    config.turns_ratio = ratio;
-    config.Lm = Lm;
-    config.bh_curve = NULL;
-    config.Rc = 0.0;
-    config.hysteresis_coeff = 0.0;
-    config.eddy_current_coeff = 0.0;
-    config.core_area = 0.0;
-    config.magnetic_path_length = 0.0;
-    config.N_primary = 1;
-    config.N_secondary = (int)(ratio > 0 ? ratio : 1);
-    config.burden_resistance = 0.0;
-    config.initial_flux = 0.0;
-    config.initial_current = 0.0;
-
-    MNAStatus status = mna_add_transformer(ctx->solver,
-                                            n_p1, n_p2, n_s1, n_s2,
-                                            &config, &handle);
-
-    if (status != MNA_SUCCESS) {
-        return report_error(ctx, line_num, "Failed to add transformer");
-    }
-
-    return MNA_SUCCESS;
-}
-
 static void diode_iv_function(const ComponentState* state, void* user_data,
                               double* current, double* conductance) {
     double* params = (double*)user_data;
@@ -792,8 +716,6 @@ static MNAStatus parse_line(NetlistContext* ctx, const char* line, int line_num)
             return parse_switch(ctx, clean_line, line_num);
         case 'D':
             return parse_diode(ctx, clean_line, line_num);
-        case 'T':
-            return parse_transformer(ctx, clean_line, line_num);
         default:
             return report_error(ctx, line_num, "Unknown component type");
     }

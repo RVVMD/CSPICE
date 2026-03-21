@@ -1,7 +1,6 @@
 #include "ac.h"
 #include "../include/matrix.h"
 #include "../elements/nonlinear/nonlinear.h"
-#include "../elements/transformer.h"
 #include <stdlib.h>
 
 MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
@@ -98,61 +97,8 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                 break;
             }
 
-            case MNA_CUSTOM_NPOLE: {
-                NPoleData* npole = comp->data.npole.npole_data;
-                if (npole) {
-                    TransformerData* xf = (TransformerData*)npole->user_data;
-                    if (xf) xf->is_ac_analysis = true;
-
-                    int branch_idx = npole->branch_current_indices[0];
-                    int p1 = npole->nodes[0];
-                    int p2 = npole->nodes[1];
-                    int s1 = npole->nodes[2];
-                    int s2 = npole->nodes[3];
-                    double n = xf->turns_ratio;
-
-                    /* AC stamp for ideal transformer:
-                     * Vp - n*Vs = 0  →  [branch row: p1=1, p2=-1, s1=-n, s2=n]
-                     * n*Ip + Is = 0  →  [KCL rows: p1+=n, p2-=n, s1+=1, s2-=1]
-                     */
-                    /* Branch equation row */
-                    if (p1 > 0) A_complex[branch_idx * matrix_size + (p1-1)] = 1.0;
-                    if (p2 > 0) A_complex[branch_idx * matrix_size + (p2-1)] = -1.0;
-                    if (s1 > 0) A_complex[branch_idx * matrix_size + (s1-1)] = -n;
-                    if (s2 > 0) A_complex[branch_idx * matrix_size + (s2-1)] = n;
-
-                    /* KCL columns */
-                    if (p1 > 0) A_complex[(p1-1) * matrix_size + branch_idx] = n;
-                    if (p2 > 0) A_complex[(p2-1) * matrix_size + branch_idx] = -n;
-                    if (s1 > 0) A_complex[(s1-1) * matrix_size + branch_idx] = 1.0;
-                    if (s2 > 0) A_complex[(s2-1) * matrix_size + branch_idx] = -1.0;
-
-                    /* Stamp magnetizing inductance (parallel across primary) */
-                    if (xf->Lm > 0) {
-                        double complex Ym = 1.0 / (I * omega * xf->Lm);
-                        if (p1 > 0) A_complex[(p1-1) * matrix_size + (p1-1)] += Ym;
-                        if (p2 > 0) A_complex[(p2-1) * matrix_size + (p2-1)] += Ym;
-                        if (p1 > 0 && p2 > 0) {
-                            A_complex[(p1-1) * matrix_size + (p2-1)] -= Ym;
-                            A_complex[(p2-1) * matrix_size + (p1-1)] -= Ym;
-                        }
-                    }
-
-                    /* Stamp core loss resistance (parallel across primary) */
-                    if (xf->Rc > 0) {
-                        double complex Gc = 1.0 / xf->Rc;
-                        if (p1 > 0) A_complex[(p1-1) * matrix_size + (p1-1)] += Gc;
-                        if (p2 > 0) A_complex[(p2-1) * matrix_size + (p2-1)] += Gc;
-                        if (p1 > 0 && p2 > 0) {
-                            A_complex[(p1-1) * matrix_size + (p2-1)] -= Gc;
-                            A_complex[(p2-1) * matrix_size + (p1-1)] -= Gc;
-                        }
-                    }
-
-                    xf->is_ac_analysis = false;
-                }
+            case MNA_CUSTOM_NPOLE:
                 continue;
-            }
 
             case MNA_SWITCH:
                 admittance = comp->state ? 1.0 / comp->value : MNA_MIN_CONDUCTANCE;

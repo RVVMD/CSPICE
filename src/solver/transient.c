@@ -3,7 +3,6 @@
 #include "../elements/passive.h"
 #include "../elements/sources.h"
 #include "../elements/nonlinear/nonlinear.h"
-#include "../elements/transformer.h"
 #include <stdlib.h>
 
 static void mna_solve_initial_conditions(MNASolver* solver) {
@@ -55,30 +54,9 @@ static void mna_solve_initial_conditions(MNASolver* solver) {
             case MNA_CUSTOM_NPOLE:
                 {
                     NPoleData* npole = comp->data.npole.npole_data;
-                    if (npole && npole->num_nodes >= 4) {
-                        TransformerData* xf = (TransformerData*)npole->user_data;
-                        if (xf) {
-                            double n = xf->turns_ratio;
-                            int p1 = npole->nodes[0];
-                            int p2 = npole->nodes[1];
-                            int s1 = npole->nodes[2];
-                            int s2 = npole->nodes[3];
-                            int branch_idx = npole->branch_current_indices[0];
-
-                            if (p1 > 0) MAT(solver, branch_idx, p1 - 1) = -n;
-                            if (p2 > 0) MAT(solver, branch_idx, p2 - 1) = n;
-                            if (s1 > 0) MAT(solver, branch_idx, s1 - 1) = 1.0;
-                            if (s2 > 0) MAT(solver, branch_idx, s2 - 1) = -1.0;
-
-                            if (p1 > 0) MAT(solver, p1 - 1, branch_idx) = 1.0;
-                            if (p2 > 0) MAT(solver, p2 - 1, branch_idx) = -1.0;
-                            if (s1 > 0) MAT(solver, s1 - 1, branch_idx) = 1.0 / n;
-                            if (s2 > 0) MAT(solver, s2 - 1, branch_idx) = -1.0 / n;
-
-                            xf->phi = 0.0;
-                            xf->prev_phi = 0.0;
-                            xf->i_mag = 0.0;
-                        }
+                    if (npole) {
+                        npole->stamp_func(solver, npole->nodes, npole->num_nodes,
+                                          npole->user_data, 0.0, 0.0, 0);
                     }
                 }
                 break;
@@ -132,22 +110,6 @@ static void mna_solve_initial_conditions(MNASolver* solver) {
 
         comp->prev_voltage = comp->last_voltage;
         comp->prev_current = comp->last_current;
-
-        if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
-            TransformerData* xf_data = (TransformerData*)comp->data.npole.npole_data->user_data;
-            if (xf_data) {
-                xf_data->phi = 0.0;
-                xf_data->prev_phi = 0.0;
-                xf_data->i_mag = 0.0;
-                /* Initialize history voltages from DC solution */
-                int p1 = comp->data.npole.npole_data->nodes[0];
-                int p2 = comp->data.npole.npole_data->nodes[1];
-                double v1 = (p1 > 0) ? solver->x[p1 - 1] : 0.0;
-                double v2 = (p2 > 0) ? solver->x[p2 - 1] : 0.0;
-                xf_data->v_primary_n = v1 - v2;
-                xf_data->v_primary_stage1 = v1 - v2;
-            }
-        }
     }
 }
 
@@ -329,8 +291,7 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                     comp->last_current = i;
                 }
             } else if (comp->type == MNA_CUSTOM_NPOLE) {
-                /* Post-solve flux update for voltage transformers */
-                mna_transformer_update_flux(solver, comp, stage, dt);
+                /* Post-solve update */
             } else {
                 if (stage == 1) {
                     comp->stage1_voltage = v;

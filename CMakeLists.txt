@@ -84,30 +84,6 @@ if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/TR5_sim.c")
     )
 endif()
 
-add_executable(test_transformer test_transformer.c)
-target_include_directories(test_transformer PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/elements
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(test_transformer PRIVATE mna_solver_static ${MATH_LIBRARY})
-set_target_properties(test_transformer PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
-add_executable(test_transformer_switching test_transformer_switching.c)
-target_include_directories(test_transformer_switching PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/elements
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(test_transformer_switching PRIVATE mna_solver_static ${MATH_LIBRARY})
-set_target_properties(test_transformer_switching PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
-
 add_executable(cspice ${CLI_SOURCES})
 target_include_directories(cspice PRIVATE
     ${CMAKE_CURRENT_SOURCE_DIR}

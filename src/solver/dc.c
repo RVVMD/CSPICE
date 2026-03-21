@@ -216,12 +216,6 @@ static MNAStatus mna_solve_dc_nonlinear(MNASolver* solver) {
                         npole->last_values[j] = current_val;
                     }
 
-                    TransformerData* xf = (TransformerData*)npole->user_data;
-                    if (xf && xf->Lm > 0) {
-                        double flux_diff = fabs(xf->phi - xf->prev_phi);
-                        if (flux_diff > max_diff) max_diff = flux_diff;
-                    }
-
                     double abs_tol = MNA_ABSTOL + MNA_RELTOL * (1.0 + max_diff);
                     if (max_diff > abs_tol) converged = 0;
                 }
