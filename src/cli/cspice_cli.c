@@ -47,6 +47,8 @@ static void print_help(const char* prog_name) {
     printf("  .print i_mag(<xfmr>)   Print transformer magnetizing current\n");
     printf("  .print flux(<xfmr>)    Print transformer flux linkage [Wb]\n");
     printf("  .print L_mag(<xfmr>)   Print transformer magnetizing inductance [H]\n");
+    printf("  .print B(<xfmr>)       Print magnetic flux density [T]\n");
+    printf("  .print H(<xfmr>)       Print magnetic field intensity [A/m]\n");
     printf("  .write <file.csv>      Write results to file\n");
 }
 

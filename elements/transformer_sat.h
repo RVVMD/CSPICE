@@ -131,31 +131,34 @@ MNAStatus mna_transformer_sat_set_secondary_leakage_inductance(TransformerSat* x
 MNAStatus mna_transformer_sat_set_core_loss_resistance(TransformerSat* xf, double resistance);
 
 /* ============================================================================
- * Tanh B-H Curve Convenience Setup
+ * Langevin B-H Curve Convenience Setup
  * ============================================================================ */
 
 /**
- * Configure transformer with analytic tanh B-H model
- * 
- * This is a convenience function that creates and configures a B-H curve
- * with the tanh model: B(H) = B_sat * tanh(H / H_c) + mu_0 * mu_r_lin * H
- * 
+ * Configure transformer with physics-based Langevin B-H model
+ *
+ * The Langevin function: L(x) = coth(x) - 1/x
+ * B(H) = B_sat * L(H / H_c)
+ *
+ * This model naturally saturates without artificial linear terms,
+ * producing sharper saturation knees and narrower inrush current spikes.
+ *
  * @param xf              Transformer instance
  * @param B_sat_T         Saturation flux density [T]
  * @param mu_r_initial    Initial relative permeability (at H->0)
- * @param H_c_A_m         Coercive field scale [A/m] (0 = auto-compute)
+ * @param H_c_A_m         Critical field scale [A/m] (0 = auto-compute)
  * @param core_area_m2    Core cross-sectional area [m^2]
  * @param path_length_m   Magnetic path length [m]
  * @param N_primary       Number of primary turns
  * @return MNAStatus
  */
-MNAStatus mna_transformer_sat_setup_tanh_core(TransformerSat* xf,
-                                               double B_sat_T,
-                                               double mu_r_initial,
-                                               double H_c_A_m,
-                                               double core_area_m2,
-                                               double path_length_m,
-                                               int N_primary);
+MNAStatus mna_transformer_sat_setup_langevin_core(TransformerSat* xf,
+                                                   double B_sat_T,
+                                                   double mu_r_initial,
+                                                   double H_c_A_m,
+                                                   double core_area_m2,
+                                                   double path_length_m,
+                                                   int N_primary);
 
 /* ============================================================================
  * State Queries
@@ -205,6 +208,24 @@ double mna_transformer_sat_get_secondary_current(MNASolver* solver, ComponentHan
  * @return Incremental inductance [H]
  */
 double mna_transformer_sat_get_magnetizing_inductance(MNASolver* solver, ComponentHandle handle);
+
+/**
+ * Get magnetic flux density B in the core
+ *
+ * @param solver  MNA solver instance
+ * @param handle  Component handle
+ * @return Flux density B [T]
+ */
+double mna_transformer_sat_get_B_field(MNASolver* solver, ComponentHandle handle);
+
+/**
+ * Get magnetic field intensity H in the core
+ *
+ * @param solver  MNA solver instance
+ * @param handle  Component handle
+ * @return Field intensity H [A/m]
+ */
+double mna_transformer_sat_get_H_field(MNASolver* solver, ComponentHandle handle);
 
 /* Internal cleanup function - called from mna_destroy */
 void mna_transformer_sat_cleanup(Component* comp);

@@ -96,17 +96,18 @@ set_target_properties(cspice PROPERTIES
 # =============================================================================
 # Test Programs
 # =============================================================================
-add_executable(test_transformer test_transformer_csv.c)
-target_include_directories(test_transformer PRIVATE
-    ${CMAKE_CURRENT_SOURCE_DIR}
-    ${CMAKE_CURRENT_SOURCE_DIR}/include
-    ${CMAKE_CURRENT_SOURCE_DIR}/elements
-    ${CMAKE_CURRENT_SOURCE_DIR}/src
-)
-target_link_libraries(test_transformer PRIVATE mna_solver_shared ${MATH_LIBRARY})
-set_target_properties(test_transformer PROPERTIES
-    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-)
+# Disabled: test_transformer_csv.c not present
+# add_executable(test_transformer test_transformer_csv.c)
+# target_include_directories(test_transformer PRIVATE
+#     ${CMAKE_CURRENT_SOURCE_DIR}
+#     ${CMAKE_CURRENT_SOURCE_DIR}/include
+#     ${CMAKE_CURRENT_SOURCE_DIR}/elements
+#     ${CMAKE_CURRENT_SOURCE_DIR}/src
+# )
+# target_link_libraries(test_transformer PRIVATE mna_solver_shared ${MATH_LIBRARY})
+# set_target_properties(test_transformer PROPERTIES
+#     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+# )
 
 # =============================================================================
 # Installation

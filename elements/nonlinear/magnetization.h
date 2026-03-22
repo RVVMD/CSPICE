@@ -9,15 +9,19 @@ extern "C" {
 
 /**
  * B-H Curve Model Types
- * 
- * ANALYTIC_TANH: Smooth analytic model using tanh function
- * PIECEWISE_LINEAR: Tabulated data with linear interpolation (fast, robust)
- * PIECEWISE_CUBIC: Tabulated data with cubic spline interpolation (smooth)
+ *
+ * ANALYTIC_LANGEVIN: Physics-based Langevin function (coth(x) - 1/x)
+ *   - Most accurate for transformer core saturation
+ *   - Natural saturation behavior (no artificial linear term)
+ *   - Sharper knee than tanh model
+ *
+ * PIECEWISE_LINEAR: Tabulated data with linear interpolation
+ *   - Fast and robust
+ *   - Can represent any B-H curve from measured data
  */
 typedef enum {
-    BH_MODEL_ANALYTIC_TANH,
-    BH_MODEL_PIECEWISE_LINEAR,
-    BH_MODEL_PIECEWISE_CUBIC
+    BH_MODEL_ANALYTIC_LANGEVIN,
+    BH_MODEL_PIECEWISE_LINEAR
 } BHModelType;
 
 /**
@@ -42,29 +46,25 @@ typedef struct {
     
     /* B-H model type */
     BHModelType model_type;
-    
-    /* === Analytic Tanh Model Parameters ===
-     * B(H) = B_sat * tanh(H / H_c) + mu_0 * mu_r_lin * H
-     * This model captures both saturation and linear high-field behavior
+
+    /* === Analytic Langevin Model Parameters ===
+     * B(H) = B_sat * L(H/H_c) where L(x) = coth(x) - 1/x
+     * This model naturally saturates without artificial linear terms
      */
     struct {
         double B_sat;            /* Saturation flux density [T] */
-        double H_c;              /* Coercive field scale [A/m] */
-        double mu_r_initial;     /* Initial relative permeability */
+        double H_c;              /* Critical field scale [A/m] */
         double B_rem;            /* Remanence flux density [T] (optional) */
-    } tanh_params;
+    } langevin_params;
     
     /* === Piecewise Model Data ===
      * Arrays of (H, B) data points sorted by H
-     * For cubic spline: m array stores precomputed second derivatives
      */
     struct {
         double* H_points;        /* H field values [A/m] */
         double* B_points;        /* B field values [T] */
-        double* m;               /* Second derivatives (cubic spline) */
         int num_points;          /* Number of data points */
         int allocated_size;      /* Allocated array capacity */
-        bool spline_computed;    /* Flag: are spline coefficients ready? */
     } pw_params;
     
     /* === Hysteresis State (for future extension) ===
@@ -116,24 +116,28 @@ MNAStatus mna_bh_curve_set_geometry(MagnetizationCurve* curve,
                                      int N_primary);
 
 /* ============================================================================
- * Analytic Tanh Model Configuration
+ * Analytic Langevin Model Configuration
  * ============================================================================ */
 
 /**
- * Configure analytic tanh model from physical parameters
- * 
- * The model: B(H) = B_sat * tanh(H / H_c) + μ₀ * μ_r_lin * H
- * 
- * @param curve           The B-H curve (must be BH_MODEL_ANALYTIC_TANH)
+ * Configure analytic Langevin model from physical parameters
+ *
+ * The Langevin function: L(x) = coth(x) - 1/x
+ * B(H) = B_sat * L(H / H_c)
+ *
+ * Initial permeability: μ_initial = B_sat / (3 * H_c)
+ * So H_c = B_sat / (3 * μ_0 * μ_r_initial)
+ *
+ * @param curve           The B-H curve (must be BH_MODEL_ANALYTIC_LANGEVIN)
  * @param B_sat_T         Saturation flux density [T]
  * @param mu_r_initial    Initial relative permeability (at H→0)
- * @param H_c_A_m         Coercive field scale [A/m] (optional, 0 = auto)
+ * @param H_c_A_m         Critical field scale [A/m] (optional, 0 = auto)
  * @return MNAStatus
  */
-MNAStatus mna_bh_curve_set_tanh_params(MagnetizationCurve* curve,
-                                        double B_sat_T,
-                                        double mu_r_initial,
-                                        double H_c_A_m);
+MNAStatus mna_bh_curve_set_langevin_params(MagnetizationCurve* curve,
+                                            double B_sat_T,
+                                            double mu_r_initial,
+                                            double H_c_A_m);
 
 /* ============================================================================
  * Piecewise Model: Data Point Management

@@ -14,6 +14,13 @@ extern "C" {
 #define MNA_NETLIST_MAX_SWITCH_EVENTS 32
 #define MNA_NETLIST_MAX_MODELS 16
 #define MNA_NETLIST_MAX_TRANSFORMER_MODELS 16
+#define MNA_NETLIST_MAX_COMPONENT_NAMES 128
+
+typedef struct {
+    char name[MNA_NETLIST_MAX_NAME];
+    int handle;
+    int valid;
+} ComponentNameMap;
 
 typedef struct {
     double time;
@@ -95,7 +102,9 @@ typedef enum {
     MNA_OUTPUT_I_SEC,
     MNA_OUTPUT_I_MAG,
     MNA_OUTPUT_FLUX,
-    MNA_OUTPUT_L_MAG
+    MNA_OUTPUT_L_MAG,
+    MNA_OUTPUT_B_FIELD,
+    MNA_OUTPUT_H_FIELD
 } OutputType;
 
 typedef struct {
@@ -135,6 +144,8 @@ typedef struct {
     int num_diode_models;
     TransformerModel transformer_models[MNA_NETLIST_MAX_TRANSFORMER_MODELS];
     int num_transformer_models;
+    ComponentNameMap component_names[MNA_NETLIST_MAX_COMPONENT_NAMES];
+    int num_component_names;
     int error_line;
     char error_msg[256];
 } NetlistContext;

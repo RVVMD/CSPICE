@@ -485,40 +485,40 @@ MNAStatus mna_transformer_sat_set_core_loss_resistance(TransformerSat* xf, doubl
     return MNA_SUCCESS;
 }
 
-MNAStatus mna_transformer_sat_setup_tanh_core(TransformerSat* xf,
-                                               double B_sat_T,
-                                               double mu_r_initial,
-                                               double H_c_A_m,
-                                               double core_area_m2,
-                                               double path_length_m,
-                                               int N_primary) {
+MNAStatus mna_transformer_sat_setup_langevin_core(TransformerSat* xf,
+                                                   double B_sat_T,
+                                                   double mu_r_initial,
+                                                   double H_c_A_m,
+                                                   double core_area_m2,
+                                                   double path_length_m,
+                                                   int N_primary) {
     if (!xf) return MNA_INVALID_HANDLE;
-    if (B_sat_T <= 0 || mu_r_initial <= 0 || core_area_m2 <= 0 || 
+    if (B_sat_T <= 0 || mu_r_initial <= 0 || core_area_m2 <= 0 ||
         path_length_m <= 0 || N_primary <= 0) {
         return MNA_INVALID_PARAMETER;
     }
-    
-    /* Create B-H curve with tanh model */
-    MagnetizationCurve* curve = mna_bh_curve_create(BH_MODEL_ANALYTIC_TANH);
+
+    /* Create B-H curve with Langevin model */
+    MagnetizationCurve* curve = mna_bh_curve_create(BH_MODEL_ANALYTIC_LANGEVIN);
     if (!curve) return MNA_INSUFFICIENT_MEMORY;
-    
+
     /* Set geometry */
     MNAStatus status = mna_bh_curve_set_geometry(curve, core_area_m2, path_length_m, N_primary);
     if (status != MNA_SUCCESS) {
         mna_bh_curve_destroy(curve);
         return status;
     }
-    
-    /* Set tanh parameters */
-    status = mna_bh_curve_set_tanh_params(curve, B_sat_T, mu_r_initial, H_c_A_m);
+
+    /* Set Langevin parameters */
+    status = mna_bh_curve_set_langevin_params(curve, B_sat_T, mu_r_initial, H_c_A_m);
     if (status != MNA_SUCCESS) {
         mna_bh_curve_destroy(curve);
         return status;
     }
-    
+
     xf->bh_curve = curve;
     xf->N_primary = N_primary;
-    
+
     return MNA_SUCCESS;
 }
 
@@ -593,14 +593,40 @@ double mna_transformer_sat_get_secondary_current(MNASolver* solver, ComponentHan
 
 double mna_transformer_sat_get_magnetizing_inductance(MNASolver* solver, ComponentHandle handle) {
     if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
-    
+
     Component* comp = &solver->components[handle];
     if (comp->type != MNA_CUSTOM_NPOLE || !comp->data.npole.npole_data) return 0.0;
-    
+
     TransformerSat* xf = (TransformerSat*)comp->data.npole.npole_data->user_data;
     if (!xf) return 0.0;
-    
+
     return get_magnetizing_inductance(xf, xf->flux_linkage);
+}
+
+double mna_transformer_sat_get_B_field(MNASolver* solver, ComponentHandle handle) {
+    if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
+
+    Component* comp = &solver->components[handle];
+    if (comp->type != MNA_CUSTOM_NPOLE || !comp->data.npole.npole_data) return 0.0;
+
+    TransformerSat* xf = (TransformerSat*)comp->data.npole.npole_data->user_data;
+    if (!xf || !xf->bh_curve || !xf->bh_curve->geometry_set) return 0.0;
+
+    /* B = flux / (N * A_c) */
+    return xf->flux_linkage / (xf->N_primary * xf->bh_curve->core_area);
+}
+
+double mna_transformer_sat_get_H_field(MNASolver* solver, ComponentHandle handle) {
+    if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
+
+    Component* comp = &solver->components[handle];
+    if (comp->type != MNA_CUSTOM_NPOLE || !comp->data.npole.npole_data) return 0.0;
+
+    TransformerSat* xf = (TransformerSat*)comp->data.npole.npole_data->user_data;
+    if (!xf || !xf->bh_curve || !xf->bh_curve->geometry_set) return 0.0;
+
+    /* H = N * i_mag / l_e */
+    return xf->N_primary * xf->magnetizing_current / xf->bh_curve->magnetic_path_length;
 }
 
 /* Cleanup function to be called from mna_destroy */
@@ -660,6 +686,10 @@ void mna_transformer_sat_update_state(Component* comp, double* solver_x, double 
 
     /* Update magnetizing current from B-H curve */
     if (xf->bh_curve && mna_bh_curve_is_valid(xf->bh_curve)) {
+        /* Complete B-H model: B(H) = B_sat * L(H/H_c) + μ₀ * H
+         * This model is well-behaved for all B values, no clamping needed.
+         * The μ₀*H term represents the vacuum path that always exists.
+         */
         xf->magnetizing_current = mna_bh_curve_get_current(xf->bh_curve, xf->flux_linkage);
     } else {
         /* Linear model fallback */
