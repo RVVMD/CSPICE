@@ -13,6 +13,7 @@ extern "C" {
 #define MNA_NETLIST_MAX_OUTPUTS 64
 #define MNA_NETLIST_MAX_SWITCH_EVENTS 32
 #define MNA_NETLIST_MAX_MODELS 16
+#define MNA_NETLIST_MAX_TRANSFORMER_MODELS 16
 
 typedef struct {
     double time;
@@ -31,6 +32,55 @@ typedef struct {
     int valid;
 } DiodeModel;
 
+typedef struct {
+    char name[MNA_NETLIST_MAX_NAME];
+    int valid;
+    int component_handle;  /* Handle of the instantiated component */
+    
+    /* Required: Electrical nominals (ГОСТ style) */
+    double V1_nom;        /* primary voltage [V] */
+    double V2_nom;        /* secondary voltage [V] */
+    double f_nom;         /* frequency [Hz] */
+    
+    /* Required: Core geometry (for saturation) */
+    double Acore;         /* core area [m^2] */
+    double lpath;         /* magnetic path length [m] */
+    int Np;               /* primary turns */
+    
+    /* Optional: Losses (for auto-compute) */
+    double S_nom;         /* apparent power [VA], 0 = not provided */
+    double P_core;        /* core loss [W] */
+    double P_cu;          /* copper loss [W] */
+    double u_k;           /* impedance voltage [pu] */
+    
+    /* Optional: Direct parameters (override auto-compute) */
+    double R1;            /* primary resistance [ohm] */
+    double R2;            /* secondary resistance [ohm] */
+    double L1;            /* primary leakage inductance [H] */
+    double L2;            /* secondary leakage inductance [H] */
+    double Rcore;         /* core loss resistance [ohm] */
+    
+    /* Required for saturation: B-H curve */
+    double Bsat;          /* saturation flux density [T] */
+    double Mur;           /* initial relative permeability */
+    double Brem;          /* remanent flux density [T] */
+    
+    /* Computed turns ratio */
+    double turns_ratio;   /* n = V1_nom / V2_nom */
+    
+    /* Flags for which parameters were explicitly set */
+    int has_S_nom;
+    int has_P_core;
+    int has_P_cu;
+    int has_u_k;
+    int has_R1;
+    int has_R2;
+    int has_L1;
+    int has_L2;
+    int has_Rcore;
+    int has_Brem;
+} TransformerModel;
+
 typedef enum {
     MNA_ANALYSIS_NONE,
     MNA_ANALYSIS_DC,
@@ -40,7 +90,12 @@ typedef enum {
 
 typedef enum {
     MNA_OUTPUT_VOLTAGE,
-    MNA_OUTPUT_CURRENT
+    MNA_OUTPUT_CURRENT,
+    MNA_OUTPUT_I_PRI,
+    MNA_OUTPUT_I_SEC,
+    MNA_OUTPUT_I_MAG,
+    MNA_OUTPUT_FLUX,
+    MNA_OUTPUT_L_MAG
 } OutputType;
 
 typedef struct {
@@ -78,6 +133,8 @@ typedef struct {
     int num_switches;
     DiodeModel diode_models[MNA_NETLIST_MAX_MODELS];
     int num_diode_models;
+    TransformerModel transformer_models[MNA_NETLIST_MAX_TRANSFORMER_MODELS];
+    int num_transformer_models;
     int error_line;
     char error_msg[256];
 } NetlistContext;

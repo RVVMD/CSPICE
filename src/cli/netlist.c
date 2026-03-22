@@ -6,10 +6,13 @@
 #include "../../elements/passive.h"
 #include "../../elements/sources.h"
 #include "../../elements/nonlinear/nonlinear.h"
+#include "../../elements/transformer.h"
+#include "../../elements/transformer_sat.h"
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 #include <ctype.h>
+#include <math.h>
 
 static void skip_whitespace(const char** p) {
     while (**p && isspace((unsigned char)**p)) (*p)++;
@@ -491,6 +494,190 @@ static MNAStatus parse_diode(NetlistContext* ctx, const char* line, int line_num
     return MNA_SUCCESS;
 }
 
+static MNAStatus parse_transformer_ideal(NetlistContext* ctx, const char* line, int line_num) {
+    char name[MNA_NETLIST_MAX_NAME], token[64];
+    int node1, node2, node3, node4;
+    double turns_ratio;
+    ComponentHandle handle;
+    const char* p = line + 1;
+
+    parse_token(&p, name, sizeof(name));
+    parse_token(&p, token, sizeof(token));
+    node1 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node2 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node3 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node4 = atoi(token);
+    turns_ratio = parse_value(&p);
+
+    if (turns_ratio <= 0) {
+        return report_error(ctx, line_num, "Invalid turns ratio for transformer");
+    }
+
+    int n1 = get_or_create_node(ctx, node1);
+    int n2 = get_or_create_node(ctx, node2);
+    int n3 = get_or_create_node(ctx, node3);
+    int n4 = get_or_create_node(ctx, node4);
+
+    if (n1 < 0 || n2 < 0 || n3 < 0 || n4 < 0) {
+        return report_error(ctx, line_num, "Failed to create nodes for transformer");
+    }
+
+    if (mna_add_ideal_transformer(ctx->solver, n1, n2, n3, n4, turns_ratio, &handle) != MNA_SUCCESS) {
+        return report_error(ctx, line_num, "Failed to add ideal transformer");
+    }
+
+    return MNA_SUCCESS;
+}
+
+static MNAStatus transformer_compute_gost_params(TransformerModel* model) {
+    /* Compute turns ratio */
+    model->turns_ratio = model->V1_nom / model->V2_nom;
+    double n = model->turns_ratio;
+
+    /* If S_nom is provided, auto-compute R and L parameters */
+    if (model->has_S_nom && model->S_nom > 0) {
+        double I1_nom = model->S_nom / model->V1_nom;
+        double I2_nom = model->S_nom / model->V2_nom;
+
+        /* Winding resistance from copper loss */
+        if (!model->has_R1 && !model->has_R2 && model->has_P_cu && model->P_cu > 0) {
+            double R_total = model->P_cu / (I1_nom * I1_nom);
+            model->R1 = R_total * 0.5;
+            model->R2 = (R_total * 0.5) / (n * n);
+        }
+
+        /* Leakage inductance from impedance voltage */
+        if (!model->has_L1 && !model->has_L2 && model->has_u_k && model->u_k > 0) {
+            double Z_base = (model->V1_nom * model->V1_nom) / model->S_nom;
+            double Z_k = model->u_k * Z_base;
+            double R_total = model->has_P_cu ? model->P_cu / (I1_nom * I1_nom) : 0;
+            double X_leak_sq = Z_k * Z_k - R_total * R_total;
+            if (X_leak_sq > 0) {
+                double X_leak = sqrt(X_leak_sq);
+                model->L1 = X_leak / (2.0 * M_PI * model->f_nom);
+                model->L2 = model->L1 / (n * n);
+            }
+        }
+
+        /* Core loss resistance */
+        if (!model->has_Rcore && model->has_P_core && model->P_core > 0) {
+            model->Rcore = (model->V1_nom * model->V1_nom) / model->P_core;
+        }
+    }
+
+    return MNA_SUCCESS;
+}
+
+static MNAStatus parse_transformer_sat(NetlistContext* ctx, const char* line, int line_num) {
+    char name[MNA_NETLIST_MAX_NAME], token[64], model_name[MNA_NETLIST_MAX_NAME];
+    int node1, node2, node3, node4;
+    ComponentHandle handle;
+    const char* p = line + 1;
+
+    parse_token(&p, name, sizeof(name));
+    parse_token(&p, token, sizeof(token));
+    node1 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node2 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node3 = atoi(token);
+    parse_token(&p, token, sizeof(token));
+    node4 = atoi(token);
+
+    parse_token(&p, model_name, sizeof(model_name));
+    to_upper(model_name);
+
+    int n1 = get_or_create_node(ctx, node1);
+    int n2 = get_or_create_node(ctx, node2);
+    int n3 = get_or_create_node(ctx, node3);
+    int n4 = get_or_create_node(ctx, node4);
+
+    if (n1 < 0 || n2 < 0 || n3 < 0 || n4 < 0) {
+        return report_error(ctx, line_num, "Failed to create nodes for transformer");
+    }
+
+    /* Find transformer model */
+    TransformerModel* model = NULL;
+    for (int i = 0; i < ctx->num_transformer_models; i++) {
+        char upper_name[MNA_NETLIST_MAX_NAME];
+        strncpy(upper_name, ctx->transformer_models[i].name, MNA_NETLIST_MAX_NAME - 1);
+        upper_name[MNA_NETLIST_MAX_NAME - 1] = '\0';
+        to_upper(upper_name);
+        if (strcmp(upper_name, model_name) == 0) {
+            model = &ctx->transformer_models[i];
+            break;
+        }
+    }
+
+    if (!model || !model->valid) {
+        return report_error(ctx, line_num, "Transformer model not found");
+    }
+
+    /* Compute derived parameters if needed */
+    transformer_compute_gost_params(model);
+
+    /* Create transformer */
+    if (mna_add_transformer_sat(ctx->solver, n1, n2, n3, n4, model->turns_ratio, &handle) != MNA_SUCCESS) {
+        return report_error(ctx, line_num, "Failed to add transformer");
+    }
+
+    /* Store the component handle in the model for later lookup */
+    model->component_handle = handle;
+
+    TransformerSat* xf = mna_get_transformer_sat(ctx->solver, handle);
+    if (!xf) {
+        return report_error(ctx, line_num, "Failed to get transformer structure");
+    }
+
+    /* Set parameters - use computed values if direct values not provided */
+    if (model->has_R1) {
+        mna_transformer_sat_set_primary_resistance(xf, model->R1);
+    } else if (model->R1 > 0) {
+        mna_transformer_sat_set_primary_resistance(xf, model->R1);
+    }
+
+    if (model->has_R2) {
+        mna_transformer_sat_set_secondary_resistance(xf, model->R2);
+    } else if (model->R2 > 0) {
+        mna_transformer_sat_set_secondary_resistance(xf, model->R2);
+    }
+
+    if (model->has_L1) {
+        mna_transformer_sat_set_primary_leakage_inductance(xf, model->L1);
+    } else if (model->L1 > 0) {
+        mna_transformer_sat_set_primary_leakage_inductance(xf, model->L1);
+    }
+
+    if (model->has_L2) {
+        mna_transformer_sat_set_secondary_leakage_inductance(xf, model->L2);
+    } else if (model->L2 > 0) {
+        mna_transformer_sat_set_secondary_leakage_inductance(xf, model->L2);
+    }
+
+    if (model->has_Rcore) {
+        mna_transformer_sat_set_core_loss_resistance(xf, model->Rcore);
+    } else if (model->Rcore > 0) {
+        mna_transformer_sat_set_core_loss_resistance(xf, model->Rcore);
+    }
+
+    /* Setup core with tanh model */
+    MNAStatus status = mna_transformer_sat_setup_tanh_core(xf,
+                                                            model->Bsat,
+                                                            model->Mur,
+                                                            0.0,  /* H_c auto-compute */
+                                                            model->Acore,
+                                                            model->lpath,
+                                                            model->Np);
+    if (status != MNA_SUCCESS) {
+        return report_error(ctx, line_num, "Failed to setup transformer core");
+    }
+
+    return MNA_SUCCESS;
+}
+
 static MNAStatus parse_model_cmd(NetlistContext* ctx, const char* line, int line_num) {
     char model_name[MNA_NETLIST_MAX_NAME], model_type[32];
     const char* p = line;
@@ -499,57 +686,203 @@ static MNAStatus parse_model_cmd(NetlistContext* ctx, const char* line, int line
     parse_token(&p, model_type, sizeof(model_type));
     to_upper(model_type);
 
-    if (strcmp(model_type, "D") != 0) {
+    /* Handle diode models */
+    if (strcmp(model_type, "D") == 0) {
+        if (ctx->num_diode_models >= MNA_NETLIST_MAX_MODELS) {
+            return report_error(ctx, line_num, "Too many diode models");
+        }
+
+        DiodeModel* model = &ctx->diode_models[ctx->num_diode_models];
+        strncpy(model->name, model_name, MNA_NETLIST_MAX_NAME - 1);
+        model->name[MNA_NETLIST_MAX_NAME - 1] = '\0';
+
+        model->Is = 1e-14;
+        model->n = 1.0;
+        model->BV = 0;
+        model->IBV = 0;
+        model->valid = 1;
+
+        skip_whitespace(&p);
+        if (*p == '(') p++;
+
+        char param_name[32];
+
+        while (*p && *p != ';' && *p != '\n') {
+            skip_whitespace(&p);
+            if (*p == '\0' || *p == ';' || *p == '\n') break;
+
+            int i = 0;
+            while (*p && isalpha((unsigned char)*p) && i < 31) {
+                param_name[i++] = *p++;
+            }
+            param_name[i] = '\0';
+
+            if (i == 0) break;
+
+            if (*p == '=') p++;
+
+            double param_value = parse_value(&p);
+
+            if (strcmp(param_name, "Is") == 0 || strcmp(param_name, "IS") == 0) {
+                model->Is = param_value;
+            } else if (strcmp(param_name, "n") == 0 || strcmp(param_name, "N") == 0) {
+                model->n = param_value;
+            } else if (strcmp(param_name, "BV") == 0 || strcmp(param_name, "bv") == 0) {
+                model->BV = param_value;
+            } else if (strcmp(param_name, "IBV") == 0 || strcmp(param_name, "ibv") == 0) {
+                model->IBV = param_value;
+            }
+        }
+
+        ctx->num_diode_models++;
         return MNA_SUCCESS;
     }
 
-    if (ctx->num_diode_models >= MNA_NETLIST_MAX_MODELS) {
-        return report_error(ctx, line_num, "Too many diode models");
-    }
+    /* Handle transformer saturation models */
+    if (strcmp(model_type, "TRSAT") == 0) {
+        if (ctx->num_transformer_models >= MNA_NETLIST_MAX_TRANSFORMER_MODELS) {
+            return report_error(ctx, line_num, "Too many transformer models");
+        }
 
-    DiodeModel* model = &ctx->diode_models[ctx->num_diode_models];
-    strncpy(model->name, model_name, MNA_NETLIST_MAX_NAME - 1);
-    model->name[MNA_NETLIST_MAX_NAME - 1] = '\0';
+        TransformerModel* model = &ctx->transformer_models[ctx->num_transformer_models];
+        strncpy(model->name, model_name, MNA_NETLIST_MAX_NAME - 1);
+        model->name[MNA_NETLIST_MAX_NAME - 1] = '\0';
 
-    model->Is = 1e-14;
-    model->n = 1.0;
-    model->BV = 0;
-    model->IBV = 0;
-    model->valid = 1;
+        /* Initialize defaults */
+        model->valid = 1;
+        model->component_handle = -1;
+        model->V1_nom = 0;
+        model->V2_nom = 0;
+        model->f_nom = 50.0;  /* Default 50 Hz */
+        model->Acore = 0;
+        model->lpath = 0;
+        model->Np = 0;
+        model->S_nom = 0;
+        model->P_core = 0;
+        model->P_cu = 0;
+        model->u_k = 0;
+        model->R1 = 0;
+        model->R2 = 0;
+        model->L1 = 0;
+        model->L2 = 0;
+        model->Rcore = 0;
+        model->Bsat = 0;
+        model->Mur = 0;
+        model->Brem = 0;
+        model->turns_ratio = 0;
+        model->has_S_nom = 0;
+        model->has_P_core = 0;
+        model->has_P_cu = 0;
+        model->has_u_k = 0;
+        model->has_R1 = 0;
+        model->has_R2 = 0;
+        model->has_L1 = 0;
+        model->has_L2 = 0;
+        model->has_Rcore = 0;
+        model->has_Brem = 0;
 
-    skip_whitespace(&p);
-    if (*p == '(') p++;
-
-    char param_name[32];
-
-    while (*p && *p != ';' && *p != '\n') {
         skip_whitespace(&p);
-        if (*p == '\0' || *p == ';' || *p == '\n') break;
+        if (*p == '(') p++;
 
-        int i = 0;
-        while (*p && isalpha((unsigned char)*p) && i < 31) {
-            param_name[i++] = *p++;
+        char param_name[32];
+
+        while (*p && *p != ';' && *p != '\n') {
+            skip_whitespace(&p);
+            if (*p == '\0' || *p == ';' || *p == '\n') break;
+
+            int i = 0;
+            while (*p && (isalnum((unsigned char)*p) || *p == '_') && i < 31) {
+                param_name[i++] = *p++;
+            }
+            param_name[i] = '\0';
+
+            if (i == 0) break;
+
+            if (*p == '=') p++;
+
+            double param_value = parse_value(&p);
+
+            /* Electrical nominals */
+            if (strcmp(param_name, "V1_nom") == 0 || strcmp(param_name, "v1_nom") == 0) {
+                model->V1_nom = param_value;
+            } else if (strcmp(param_name, "V2_nom") == 0 || strcmp(param_name, "v2_nom") == 0) {
+                model->V2_nom = param_value;
+            } else if (strcmp(param_name, "f_nom") == 0 || strcmp(param_name, "f_nom") == 0) {
+                model->f_nom = param_value;
+            }
+            /* Core geometry */
+            else if (strcmp(param_name, "Acore") == 0 || strcmp(param_name, "acore") == 0) {
+                model->Acore = param_value;
+            } else if (strcmp(param_name, "lpath") == 0 || strcmp(param_name, "lpath") == 0) {
+                model->lpath = param_value;
+            } else if (strcmp(param_name, "Np") == 0 || strcmp(param_name, "np") == 0) {
+                model->Np = (int)param_value;
+            }
+            /* Losses (ГОСТ) */
+            else if (strcmp(param_name, "S_nom") == 0 || strcmp(param_name, "s_nom") == 0 ||
+                     strcmp(param_name, "S") == 0 || strcmp(param_name, "s") == 0) {
+                model->S_nom = param_value;
+                model->has_S_nom = 1;
+            } else if (strcmp(param_name, "P_core") == 0 || strcmp(param_name, "p_core") == 0 ||
+                       strcmp(param_name, "Pxx") == 0 || strcmp(param_name, "pxx") == 0) {
+                model->P_core = param_value;
+                model->has_P_core = 1;
+            } else if (strcmp(param_name, "P_cu") == 0 || strcmp(param_name, "p_cu") == 0 ||
+                       strcmp(param_name, "Pk") == 0 || strcmp(param_name, "pk") == 0) {
+                model->P_cu = param_value;
+                model->has_P_cu = 1;
+            } else if (strcmp(param_name, "u_k") == 0 || strcmp(param_name, "uk") == 0) {
+                /* Handle percentage format (e.g., 10% or 0.10) */
+                model->u_k = param_value;
+                model->has_u_k = 1;
+            }
+            /* Direct parameters */
+            else if (strcmp(param_name, "R1") == 0 || strcmp(param_name, "r1") == 0) {
+                model->R1 = param_value;
+                model->has_R1 = 1;
+            } else if (strcmp(param_name, "R2") == 0 || strcmp(param_name, "r2") == 0) {
+                model->R2 = param_value;
+                model->has_R2 = 1;
+            } else if (strcmp(param_name, "L1") == 0 || strcmp(param_name, "l1") == 0) {
+                model->L1 = param_value;
+                model->has_L1 = 1;
+            } else if (strcmp(param_name, "L2") == 0 || strcmp(param_name, "l2") == 0) {
+                model->L2 = param_value;
+                model->has_L2 = 1;
+            } else if (strcmp(param_name, "Rcore") == 0 || strcmp(param_name, "rcore") == 0 ||
+                       strcmp(param_name, "Rc") == 0 || strcmp(param_name, "rc") == 0) {
+                model->Rcore = param_value;
+                model->has_Rcore = 1;
+            }
+            /* B-H curve */
+            else if (strcmp(param_name, "Bsat") == 0 || strcmp(param_name, "bsat") == 0 ||
+                     strcmp(param_name, "Bs") == 0 || strcmp(param_name, "bs") == 0) {
+                model->Bsat = param_value;
+            } else if (strcmp(param_name, "Mur") == 0 || strcmp(param_name, "mur") == 0 ||
+                       strcmp(param_name, "mu_r") == 0 || strcmp(param_name, "mur_initial") == 0) {
+                model->Mur = param_value;
+            } else if (strcmp(param_name, "Brem") == 0 || strcmp(param_name, "brem") == 0 ||
+                       strcmp(param_name, "Br") == 0 || strcmp(param_name, "br") == 0) {
+                model->Brem = param_value;
+                model->has_Brem = 1;
+            }
         }
-        param_name[i] = '\0';
 
-        if (i == 0) break;
-
-        if (*p == '=') p++;
-
-        double param_value = parse_value(&p);
-
-        if (strcmp(param_name, "Is") == 0 || strcmp(param_name, "IS") == 0) {
-            model->Is = param_value;
-        } else if (strcmp(param_name, "n") == 0 || strcmp(param_name, "N") == 0) {
-            model->n = param_value;
-        } else if (strcmp(param_name, "BV") == 0 || strcmp(param_name, "bv") == 0) {
-            model->BV = param_value;
-        } else if (strcmp(param_name, "IBV") == 0 || strcmp(param_name, "ibv") == 0) {
-            model->IBV = param_value;
+        /* Validate required parameters */
+        if (model->V1_nom <= 0 || model->V2_nom <= 0) {
+            return report_error(ctx, line_num, "Transformer model requires V1_nom and V2_nom");
         }
+        if (model->Acore <= 0 || model->lpath <= 0 || model->Np <= 0) {
+            return report_error(ctx, line_num, "Transformer model requires Acore, lpath, and Np");
+        }
+        if (model->Bsat <= 0 || model->Mur <= 0) {
+            return report_error(ctx, line_num, "Transformer model requires Bsat and Mur");
+        }
+
+        ctx->num_transformer_models++;
+        return MNA_SUCCESS;
     }
 
-    ctx->num_diode_models++;
     return MNA_SUCCESS;
 }
 
@@ -611,8 +944,76 @@ static MNAStatus parse_print_cmd(NetlistContext* ctx, const char* line, int line
                 return report_error(ctx, line_num, "Invalid voltage specification");
             }
         } else if (tolower(token[0]) == 'i') {
-            out->type = MNA_OUTPUT_CURRENT;
+            /* Check for transformer-specific outputs: i_pri, i_sec, i_mag */
+            if (strncasecmp(token, "i_pri", 5) == 0) {
+                out->type = MNA_OUTPUT_I_PRI;
+                char* paren = strchr(token, '(');
+                if (paren) {
+                    char* end = strchr(paren, ')');
+                    if (end) {
+                        int len = end - paren - 1;
+                        if (len >= MNA_NETLIST_MAX_NAME) len = MNA_NETLIST_MAX_NAME - 1;
+                        strncpy(out->name, paren + 1, len);
+                        out->name[len] = '\0';
+                    } else {
+                        return report_error(ctx, line_num, "Invalid i_pri specification");
+                    }
+                } else {
+                    return report_error(ctx, line_num, "Invalid i_pri specification");
+                }
+            } else if (strncasecmp(token, "i_sec", 5) == 0) {
+                out->type = MNA_OUTPUT_I_SEC;
+                char* paren = strchr(token, '(');
+                if (paren) {
+                    char* end = strchr(paren, ')');
+                    if (end) {
+                        int len = end - paren - 1;
+                        if (len >= MNA_NETLIST_MAX_NAME) len = MNA_NETLIST_MAX_NAME - 1;
+                        strncpy(out->name, paren + 1, len);
+                        out->name[len] = '\0';
+                    } else {
+                        return report_error(ctx, line_num, "Invalid i_sec specification");
+                    }
+                } else {
+                    return report_error(ctx, line_num, "Invalid i_sec specification");
+                }
+            } else if (strncasecmp(token, "i_mag", 5) == 0) {
+                out->type = MNA_OUTPUT_I_MAG;
+                char* paren = strchr(token, '(');
+                if (paren) {
+                    char* end = strchr(paren, ')');
+                    if (end) {
+                        int len = end - paren - 1;
+                        if (len >= MNA_NETLIST_MAX_NAME) len = MNA_NETLIST_MAX_NAME - 1;
+                        strncpy(out->name, paren + 1, len);
+                        out->name[len] = '\0';
+                    } else {
+                        return report_error(ctx, line_num, "Invalid i_mag specification");
+                    }
+                } else {
+                    return report_error(ctx, line_num, "Invalid i_mag specification");
+                }
+            } else {
+                /* Standard component current: i(name) */
+                out->type = MNA_OUTPUT_CURRENT;
 
+                char* paren = strchr(token, '(');
+                if (paren) {
+                    char* end = strchr(paren, ')');
+                    if (end) {
+                        int len = end - paren - 1;
+                        if (len >= MNA_NETLIST_MAX_NAME) len = MNA_NETLIST_MAX_NAME - 1;
+                        strncpy(out->name, paren + 1, len);
+                        out->name[len] = '\0';
+                    } else {
+                        return report_error(ctx, line_num, "Invalid current specification");
+                    }
+                } else {
+                    return report_error(ctx, line_num, "Invalid current specification");
+                }
+            }
+        } else if (strncasecmp(token, "flux", 4) == 0) {
+            out->type = MNA_OUTPUT_FLUX;
             char* paren = strchr(token, '(');
             if (paren) {
                 char* end = strchr(paren, ')');
@@ -622,10 +1023,26 @@ static MNAStatus parse_print_cmd(NetlistContext* ctx, const char* line, int line
                     strncpy(out->name, paren + 1, len);
                     out->name[len] = '\0';
                 } else {
-                    return report_error(ctx, line_num, "Invalid current specification");
+                    return report_error(ctx, line_num, "Invalid flux specification");
                 }
             } else {
-                return report_error(ctx, line_num, "Invalid current specification");
+                return report_error(ctx, line_num, "Invalid flux specification");
+            }
+        } else if (strncasecmp(token, "l_mag", 5) == 0) {
+            out->type = MNA_OUTPUT_L_MAG;
+            char* paren = strchr(token, '(');
+            if (paren) {
+                char* end = strchr(paren, ')');
+                if (end) {
+                    int len = end - paren - 1;
+                    if (len >= MNA_NETLIST_MAX_NAME) len = MNA_NETLIST_MAX_NAME - 1;
+                    strncpy(out->name, paren + 1, len);
+                    out->name[len] = '\0';
+                } else {
+                    return report_error(ctx, line_num, "Invalid L_mag specification");
+                }
+            } else {
+                return report_error(ctx, line_num, "Invalid L_mag specification");
             }
         }
 
@@ -645,6 +1062,28 @@ static MNAStatus parse_write_cmd(NetlistContext* ctx, const char* line, int line
 
     ctx->write_enabled = 1;
     return MNA_SUCCESS;
+}
+
+/* Helper function to find transformer component handle by name */
+static int find_transformer_handle(NetlistContext* ctx, const char* name) {
+    char upper_name[MNA_NETLIST_MAX_NAME];
+    strncpy(upper_name, name, MNA_NETLIST_MAX_NAME - 1);
+    upper_name[MNA_NETLIST_MAX_NAME - 1] = '\0';
+    
+    /* First try to find by model name in transformer_models array */
+    for (int i = 0; i < ctx->num_transformer_models; i++) {
+        TransformerModel* model = &ctx->transformer_models[i];
+        char model_upper[MNA_NETLIST_MAX_NAME];
+        strncpy(model_upper, model->name, MNA_NETLIST_MAX_NAME - 1);
+        model_upper[MNA_NETLIST_MAX_NAME - 1] = '\0';
+        to_upper(model_upper);
+        
+        if (strcmp(model_upper, upper_name) == 0 && model->valid && model->component_handle >= 0) {
+            return model->component_handle;
+        }
+    }
+    
+    return -1;
 }
 
 static MNAStatus parse_line(NetlistContext* ctx, const char* line, int line_num) {
@@ -716,6 +1155,24 @@ static MNAStatus parse_line(NetlistContext* ctx, const char* line, int line_num)
             return parse_switch(ctx, clean_line, line_num);
         case 'D':
             return parse_diode(ctx, clean_line, line_num);
+        case 'T':
+            /* Check for transformer: TR (ideal) or TRSAT (saturated) */
+            if (strlen(clean_line) > 2) {
+                char second = toupper((unsigned char)clean_line[1]);
+                if (second == 'R') {
+                    /* Check for TRSAT */
+                    if (strlen(clean_line) > 3) {
+                        char third = toupper((unsigned char)clean_line[2]);
+                        char fourth = toupper((unsigned char)clean_line[3]);
+                        if (third == 'S' && fourth == 'A') {
+                            return parse_transformer_sat(ctx, clean_line, line_num);
+                        }
+                    }
+                    /* Default to ideal transformer */
+                    return parse_transformer_ideal(ctx, clean_line, line_num);
+                }
+            }
+            return report_error(ctx, line_num, "Unknown component type");
         default:
             return report_error(ctx, line_num, "Unknown component type");
     }
@@ -730,6 +1187,7 @@ MNAStatus netlist_init(NetlistContext* ctx, MNASolver* solver) {
     ctx->error_line = 0;
     ctx->error_msg[0] = '\0';
     ctx->num_diode_models = 0;
+    ctx->num_transformer_models = 0;
 
     ctx->node_map[0] = 0;
 
@@ -902,8 +1360,18 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                 OutputVar* out = &ctx->outputs[i];
                 if (out->type == MNA_OUTPUT_VOLTAGE) {
                     fprintf(out_file, ",V(%d)", out->node);
-                } else {
+                } else if (out->type == MNA_OUTPUT_CURRENT) {
                     fprintf(out_file, ",I(%s)", out->name);
+                } else if (out->type == MNA_OUTPUT_I_PRI) {
+                    fprintf(out_file, ",i_pri(%s)", out->name);
+                } else if (out->type == MNA_OUTPUT_I_SEC) {
+                    fprintf(out_file, ",i_sec(%s)", out->name);
+                } else if (out->type == MNA_OUTPUT_I_MAG) {
+                    fprintf(out_file, ",i_mag(%s)", out->name);
+                } else if (out->type == MNA_OUTPUT_FLUX) {
+                    fprintf(out_file, ",flux(%s)", out->name);
+                } else if (out->type == MNA_OUTPUT_L_MAG) {
+                    fprintf(out_file, ",L_mag(%s)", out->name);
                 }
             }
             fprintf(out_file, "\n");
@@ -950,6 +1418,42 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                         int node = ctx->node_map[out->node];
                         double v = mna_get_node_voltage(ctx->solver, node);
                         fprintf(out_file, ",%.9e", v);
+                    } else if (out->type == MNA_OUTPUT_CURRENT) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_get_component_current(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
+                    } else if (out->type == MNA_OUTPUT_I_PRI) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_primary_current(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
+                    } else if (out->type == MNA_OUTPUT_I_SEC) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_secondary_current(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
+                    } else if (out->type == MNA_OUTPUT_I_MAG) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_magnetizing_current(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
+                    } else if (out->type == MNA_OUTPUT_FLUX) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_flux_linkage(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
+                    } else if (out->type == MNA_OUTPUT_L_MAG) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_magnetizing_inductance(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        }
                     }
                 }
                 fprintf(out_file, "\n");

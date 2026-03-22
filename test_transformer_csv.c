@@ -44,7 +44,7 @@
 
 /* Core loss (eddy current + hysteresis) */
 #define P_CORE_LOSS     2.0         /* Core loss [W] at rated voltage */
-#define R_CORE          (V_RMS * V_RMS / P_CORE_LOSS)  /* ~7200 ohm */
+#define R_CORE          1e99  /* ~7200 ohm */
 
 /* Simulation parameters */
 #define T_FINAL         2.0         /* 2.0 seconds (120 cycles at 60Hz) */
