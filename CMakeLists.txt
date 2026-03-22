@@ -5,8 +5,12 @@ set(CMAKE_C_STANDARD 11)
 set(CMAKE_C_STANDARD_REQUIRED ON)
 set(CMAKE_POSITION_INDEPENDENT_CODE ON)
 
-find_library(MATH_LIBRARY m)
+# Find math library (libm)
+find_library(MATH_LIBRARY m REQUIRED)
 
+# =============================================================================
+# Library Sources
+# =============================================================================
 set(MNA_SOURCES
     src/matrix.c
     src/solver/core.c
@@ -18,11 +22,7 @@ set(MNA_SOURCES
     elements/nonlinear/nonlinear.c
     elements/nonlinear/magnetization.c
     elements/transformer.c
-)
-
-set(CLI_SOURCES
-    src/cli/netlist.c
-    src/cli/cspice_cli.c
+    elements/transformer_sat.c
 )
 
 set(MNA_HEADERS
@@ -37,10 +37,13 @@ set(MNA_HEADERS
     elements/nonlinear/nonlinear.h
     elements/nonlinear/magnetization.h
     elements/transformer.h
+    elements/transformer_sat.h
     mna_solver.h
-    src/cli/netlist.h
 )
 
+# =============================================================================
+# Static Library
+# =============================================================================
 add_library(mna_solver_static STATIC ${MNA_SOURCES})
 target_include_directories(mna_solver_static PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -55,6 +58,9 @@ set_target_properties(mna_solver_static PROPERTIES
     ARCHIVE_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
+# =============================================================================
+# Shared Library
+# =============================================================================
 add_library(mna_solver_shared SHARED ${MNA_SOURCES})
 target_include_directories(mna_solver_shared PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}
@@ -70,19 +76,10 @@ set_target_properties(mna_solver_shared PROPERTIES
     LIBRARY_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/lib
 )
 
-if(EXISTS "${CMAKE_CURRENT_SOURCE_DIR}/TR5_sim.c")
-    add_executable(tr5_sim TR5_sim.c)
-    target_include_directories(tr5_sim PRIVATE
-        ${CMAKE_CURRENT_SOURCE_DIR}
-        ${CMAKE_CURRENT_SOURCE_DIR}/include
-        ${CMAKE_CURRENT_SOURCE_DIR}/elements
-        ${CMAKE_CURRENT_SOURCE_DIR}/src
-    )
-    target_link_libraries(tr5_sim PRIVATE mna_solver_static ${MATH_LIBRARY})
-    set_target_properties(tr5_sim PROPERTIES
-        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-    )
-endif()
+# =============================================================================
+# CLI Application
+# =============================================================================
+set(CLI_SOURCES src/cli/netlist.c src/cli/cspice_cli.c)
 
 add_executable(cspice ${CLI_SOURCES})
 target_include_directories(cspice PRIVATE
@@ -96,15 +93,40 @@ set_target_properties(cspice PROPERTIES
     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
 )
 
-install(TARGETS mna_solver_static mna_solver_shared
+# =============================================================================
+# Test Programs
+# =============================================================================
+add_executable(test_transformer test_transformer_csv.c)
+target_include_directories(test_transformer PRIVATE
+    ${CMAKE_CURRENT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}/include
+    ${CMAKE_CURRENT_SOURCE_DIR}/elements
+    ${CMAKE_CURRENT_SOURCE_DIR}/src
+)
+target_link_libraries(test_transformer PRIVATE mna_solver_shared ${MATH_LIBRARY})
+set_target_properties(test_transformer PROPERTIES
+    RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+)
+
+# =============================================================================
+# Installation
+# =============================================================================
+install(TARGETS mna_solver_static mna_solver_shared cspice
     ARCHIVE DESTINATION lib
     LIBRARY DESTINATION lib
+    RUNTIME DESTINATION bin
 )
 
-install(FILES ${MNA_HEADERS}
-    DESTINATION include/mna_solver
-)
+install(FILES ${MNA_HEADERS} DESTINATION include/mna_solver)
+install(FILES mna_solver.h DESTINATION include)
 
-message(STATUS "MNA Solver Version: ${PROJECT_VERSION}")
-message(STATUS "Build Type: ${CMAKE_BUILD_TYPE}")
-message(STATUS "Math Library: ${MATH_LIBRARY}")
+# =============================================================================
+# Build Summary
+# =============================================================================
+message(STATUS "")
+message(STATUS "=== MNA Solver Configuration ===")
+message(STATUS "  Version:      ${PROJECT_VERSION}")
+message(STATUS "  Build Type:   ${CMAKE_BUILD_TYPE}")
+message(STATUS "  C Standard:   C${CMAKE_C_STANDARD}")
+message(STATUS "  Math Lib:     ${MATH_LIBRARY}")
+message(STATUS "")

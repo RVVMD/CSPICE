@@ -7,6 +7,7 @@
 #include "elements/passive.h"
 #include "elements/sources.h"
 #include "elements/transformer.h"
+#include "elements/transformer_sat.h"
 #include "elements/nonlinear/nonlinear.h"
 #include "elements/nonlinear/magnetization.h"
 #include "src/solver/dc.h"

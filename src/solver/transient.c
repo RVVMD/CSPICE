@@ -3,6 +3,7 @@
 #include "../elements/passive.h"
 #include "../elements/sources.h"
 #include "../elements/nonlinear/nonlinear.h"
+#include "../elements/transformer_sat.h"
 #include <stdlib.h>
 
 static void mna_solve_initial_conditions(MNASolver* solver) {
@@ -101,6 +102,14 @@ static void mna_solve_initial_conditions(MNASolver* solver) {
                 comp->last_current = (comp->type == MNA_RESISTOR) ?
                                      v_diff / comp->value : 0.0;
                 break;
+
+            case MNA_CUSTOM_NPOLE: {
+                /* Initialize transformer_sat state */
+                mna_transformer_sat_init_state(comp);
+                comp->last_voltage = v_diff;
+                comp->last_current = 0.0;
+                break;
+            }
 
             default:
                 comp->last_voltage = 0.0;
@@ -291,7 +300,8 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
                     comp->last_current = i;
                 }
             } else if (comp->type == MNA_CUSTOM_NPOLE) {
-                /* Post-solve update */
+                /* Post-solve state update for n-pole elements */
+                mna_transformer_sat_update_state(comp, solver->x, dt, stage);
             } else {
                 if (stage == 1) {
                     comp->stage1_voltage = v;
@@ -334,6 +344,9 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
         Component* comp = &solver->components[i];
         comp->prev_voltage = comp->last_voltage;
         comp->prev_current = comp->last_current;
+        
+        /* Update previous flux for transformer_sat */
+        mna_transformer_sat_finalize_state(comp);
     }
 
     solver->time += dt;

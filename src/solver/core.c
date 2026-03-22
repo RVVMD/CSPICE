@@ -1,5 +1,6 @@
 #include "core.h"
 #include "../include/matrix.h"
+#include "../elements/transformer_sat.h"
 #include <stdlib.h>
 
 MNAStatus mna_init(MNASolver* solver) {
@@ -31,6 +32,9 @@ void mna_destroy(MNASolver* solver) {
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
         if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+            /* Call cleanup for transformer_sat if applicable */
+            mna_transformer_sat_cleanup(comp);
+            
             NPoleData* npole = comp->data.npole.npole_data;
             free(npole->nodes);
             free(npole->last_values);
