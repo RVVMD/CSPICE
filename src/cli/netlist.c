@@ -107,7 +107,12 @@ static MNAStatus parse_resistor(NetlistContext* ctx, const char* line, int line_
     ComponentHandle handle;
     const char* p = line + 1;
 
-    parse_token(&p, name, sizeof(name));
+    /* Parse component name - include the 'R' prefix */
+    name[0] = line[0];  /* Start with 'R' */
+    name[1] = '\0';
+    parse_token(&p, token, sizeof(token));
+    strncat(name, token, MNA_NETLIST_MAX_NAME - 2);  /* Append the rest (e.g., "load") */
+
     parse_token(&p, token, sizeof(token));
     node1 = atoi(token);
     parse_token(&p, token, sizeof(token));
@@ -125,6 +130,9 @@ static MNAStatus parse_resistor(NetlistContext* ctx, const char* line, int line_
         return report_error(ctx, line_num, "Failed to add resistor");
     }
 
+    /* Register component name for I(Rx) output */
+    register_component_name(ctx, name, handle);
+
     return MNA_SUCCESS;
 }
 
@@ -135,7 +143,12 @@ static MNAStatus parse_capacitor(NetlistContext* ctx, const char* line, int line
     ComponentHandle handle;
     const char* p = line + 1;
 
-    parse_token(&p, name, sizeof(name));
+    /* Parse component name - include the 'C' prefix */
+    name[0] = line[0];  /* Start with 'C' */
+    name[1] = '\0';
+    parse_token(&p, token, sizeof(token));
+    strncat(name, token, MNA_NETLIST_MAX_NAME - 2);
+
     parse_token(&p, token, sizeof(token));
     node1 = atoi(token);
     parse_token(&p, token, sizeof(token));
@@ -153,6 +166,9 @@ static MNAStatus parse_capacitor(NetlistContext* ctx, const char* line, int line
         return report_error(ctx, line_num, "Failed to add capacitor");
     }
 
+    /* Register component name for I(Cx) output */
+    register_component_name(ctx, name, handle);
+
     return MNA_SUCCESS;
 }
 
@@ -163,7 +179,12 @@ static MNAStatus parse_inductor(NetlistContext* ctx, const char* line, int line_
     ComponentHandle handle;
     const char* p = line + 1;
 
-    parse_token(&p, name, sizeof(name));
+    /* Parse component name - include the 'L' prefix */
+    name[0] = line[0];  /* Start with 'L' */
+    name[1] = '\0';
+    parse_token(&p, token, sizeof(token));
+    strncat(name, token, MNA_NETLIST_MAX_NAME - 2);
+
     parse_token(&p, token, sizeof(token));
     node1 = atoi(token);
     parse_token(&p, token, sizeof(token));
@@ -180,6 +201,9 @@ static MNAStatus parse_inductor(NetlistContext* ctx, const char* line, int line_
     if (mna_add_inductor(ctx->solver, n1, n2, value, &handle) != MNA_SUCCESS) {
         return report_error(ctx, line_num, "Failed to add inductor");
     }
+
+    /* Register component name for I(Lx) output */
+    register_component_name(ctx, name, handle);
 
     return MNA_SUCCESS;
 }
@@ -699,6 +723,9 @@ static MNAStatus parse_transformer_sat(NetlistContext* ctx, const char* line, in
         return report_error(ctx, line_num, "Failed to setup transformer core");
     }
 
+    /* Register component name for output lookup */
+    register_component_name(ctx, name, handle);
+
     return MNA_SUCCESS;
 }
 
@@ -940,10 +967,20 @@ static MNAStatus parse_print_cmd(NetlistContext* ctx, const char* line, int line
     const char* p = line;
     char token[64];
 
+    /* Skip the analysis type (TRAN, AC, DC) - first token */
+    skip_whitespace(&p);
+    int i = 0;
+    while (*p && !isspace((unsigned char)*p) && *p != ';' && *p != '\n' && i < 63) {
+        token[i++] = *p++;
+    }
+    token[i] = '\0';
+    /* First token is analysis type, skip it */
+
+    /* Now parse the output variables */
     while (*p && *p != ';' && *p != '\n') {
         skip_whitespace(&p);
 
-        int i = 0;
+        i = 0;
         while (*p && !isspace((unsigned char)*p) && *p != ';' && *p != '\n' && i < 63) {
             token[i++] = *p;
             p++;
@@ -1127,7 +1164,23 @@ static int find_transformer_handle(NetlistContext* ctx, const char* name) {
     upper_name[MNA_NETLIST_MAX_NAME - 1] = '\0';
     to_upper(upper_name);
 
-    /* First try to find by model name in transformer_models array */
+    /* First try to find by component name in component_names array */
+    for (int i = 0; i < ctx->num_component_names; i++) {
+        char comp_upper[MNA_NETLIST_MAX_NAME];
+        strncpy(comp_upper, ctx->component_names[i].name, MNA_NETLIST_MAX_NAME - 1);
+        comp_upper[MNA_NETLIST_MAX_NAME - 1] = '\0';
+        to_upper(comp_upper);
+
+        if (strcmp(comp_upper, upper_name) == 0) {
+            /* Check if this component is a transformer */
+            Component* comp = &ctx->solver->components[ctx->component_names[i].handle];
+            if (comp && comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
+                return ctx->component_names[i].handle;
+            }
+        }
+    }
+
+    /* Fall back to searching by model name in transformer_models array */
     for (int i = 0; i < ctx->num_transformer_models; i++) {
         TransformerModel* model = &ctx->transformer_models[i];
         char model_upper[MNA_NETLIST_MAX_NAME];
@@ -1168,13 +1221,13 @@ static int find_component_handle_by_name(NetlistContext* ctx, const char* name) 
             strncpy(comp_upper, ctx->component_names[i].name, MNA_NETLIST_MAX_NAME - 1);
             comp_upper[MNA_NETLIST_MAX_NAME - 1] = '\0';
             to_upper(comp_upper);
-            
+
             if (strcmp(comp_upper, upper_name) == 0) {
                 return ctx->component_names[i].handle;
             }
         }
     }
-    
+
     return -1;
 }
 
@@ -1520,7 +1573,6 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                             double val = mna_get_component_current(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
                         } else {
-                            /* Print 0 if component not found to maintain CSV column count */
                             fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_I_PRI) {
@@ -1528,36 +1580,48 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                         if (handle >= 0) {
                             double val = mna_transformer_sat_get_primary_current(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
-                        }
-                    } else if (out->type == MNA_OUTPUT_I_SEC) {
-                        int handle = find_transformer_handle(ctx, out->name);
-                        if (handle >= 0) {
-                            double val = mna_transformer_sat_get_secondary_current(ctx->solver, handle);
-                            fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_I_MAG) {
                         int handle = find_transformer_handle(ctx, out->name);
                         if (handle >= 0) {
                             double val = mna_transformer_sat_get_magnetizing_current(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
+                        }
+                    } else if (out->type == MNA_OUTPUT_I_SEC) {
+                        int handle = find_transformer_handle(ctx, out->name);
+                        if (handle >= 0) {
+                            double val = mna_transformer_sat_get_secondary_current(ctx->solver, handle);
+                            fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_FLUX) {
                         int handle = find_transformer_handle(ctx, out->name);
                         if (handle >= 0) {
                             double val = mna_transformer_sat_get_flux_linkage(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_L_MAG) {
                         int handle = find_transformer_handle(ctx, out->name);
                         if (handle >= 0) {
                             double val = mna_transformer_sat_get_magnetizing_inductance(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_B_FIELD) {
                         int handle = find_transformer_handle(ctx, out->name);
                         if (handle >= 0) {
                             double val = mna_transformer_sat_get_B_field(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
+                        } else {
+                            fprintf(out_file, ",0.0");
                         }
                     } else if (out->type == MNA_OUTPUT_H_FIELD) {
                         int handle = find_transformer_handle(ctx, out->name);
@@ -1565,7 +1629,6 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                             double val = mna_transformer_sat_get_H_field(ctx->solver, handle);
                             fprintf(out_file, ",%.9e", val);
                         } else {
-                            /* Print 0 if component not found to maintain CSV column count */
                             fprintf(out_file, ",0.0");
                         }
                     }
