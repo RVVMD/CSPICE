@@ -42,8 +42,9 @@ struct TransformerSat {
     int branch_var_L2;            /* Branch current for secondary leakage inductance */
 
     /* Terminal nodes */
-    int nodes[4];                 /* p1, p2, s1, s2 */
-    int node_internal;            /* Internal magnetization node (after R1/L1) */
+    int nodes[4];                 /* p1, p2, s1, s2 (external terminals) */
+    int node_internal_pri;        /* Internal primary magnetization node (after R1/L1) */
+    int node_internal_sec;        /* Internal secondary node (before R2/L2) */
 };
 
 /* ============================================================================
@@ -147,60 +148,79 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
                                        double dt,
                                        int stage) {
     if (num_nodes != 4 || !user_data) return;
-    
+
     TransformerSat* xf = (TransformerSat*)user_data;
     int is_dc = (dt <= 0 || stage < 0);
-    
+
     int p1 = nodes[0];  /* Primary positive (external) */
     int p2 = nodes[1];  /* Primary negative (external) */
-    int s1 = nodes[2];  /* Secondary positive */
-    int s2 = nodes[3];  /* Secondary negative */
+    int s1 = nodes[2];  /* Secondary positive (external) */
+    int s2 = nodes[3];  /* Secondary negative (external) */
 
     double n = xf->turns_ratio;
 
-    /* Internal magnetization node: when R1/L1 is present, the magnetizing branch
-     * connects to an internal node after the series impedance. This ensures
-     * inrush current flows through R1/L1, providing proper damping.
-     * For now, we use p1 as the internal node but ensure the series RL is
-     * stamped correctly to provide damping.
+    /* Internal nodes:
+     * - node_internal_pri (m1): magnetizing node after primary series impedance
+     * 
+     * Topology:
+     *   p1 (ext) --[R1/L1]-- m1 (int) --[L_mag]-- p2 (ext)
+     *                           |
+     *                           |-- Ideal Transformer Primary
+     *                           |
+     * Ideal Transformer Secondary: constrains V_m1/V_p2 = n * V_s1/V_s2
+     *   (secondary leakage L2 is NOT implemented internally - add externally if needed)
      */
-    int m1 = p1;
-    int m2 = p2;
+    int m1 = xf->node_internal_pri;  /* Primary internal node */
+    int m2 = xf->node_internal_sec;  /* Secondary internal node - NOT USED for now */
+    int p2_node = p2;  /* Primary return (usually ground) */
+    int s2_node = s2;  /* Secondary return */
+
+    /* If R1/L1 is not present, short p1 to m1 */
+    int has_primary_rl = (xf->R1 > 1e-12 || xf->L1_leak > 1e-12);
+    if (!has_primary_rl) {
+        mna_stamp_conductance(solver, p1, m1, MNA_MAX_CONDUCTANCE);
+    }
+
+    /* Short m2 to s1 for now (L2_leak not implemented) */
+    mna_stamp_conductance(solver, m2, s1, MNA_MAX_CONDUCTANCE);
 
     (void)time;
-    
+
     /* ========================================================================
      * 1. Stamp ideal transformer constraint
-     *    V_m1 - V_m2 = n * (V_s1 - V_s2)
-     *    The ideal transformer connects to the internal magnetization node,
-     *    not directly to the external terminals.
+     *    V_m1 - V_p2 = n * (V_s1 - V_s2)
+     *    Note: Uses EXTERNAL secondary voltage (s1, s2), not internal.
+     *    Secondary leakage inductance must be added externally if needed.
      * ======================================================================== */
 
     int branch_ideal = xf->branch_var_ideal;
 
     /* Stamp B matrix for ideal transformer constraint */
-    /* Primary KCL: +i_ideal flows into m1 */
+    /* Primary KCL: +i_ideal flows out of m1 (through ideal transformer) */
     if (m1 > 0 && branch_ideal > 0) {
         MAT(solver, m1 - 1, branch_ideal - 1) += 1.0;
     }
-    if (m2 > 0 && branch_ideal > 0) {
-        MAT(solver, m2 - 1, branch_ideal - 1) += -1.0;
+    if (p2_node > 0 && branch_ideal > 0) {
+        MAT(solver, p2_node - 1, branch_ideal - 1) += -1.0;
     }
 
-    /* Secondary KCL: -n * i_ideal (current scaled by turns ratio) */
+    /* Secondary KCL: -n * i_ideal flows into s1 from ideal transformer secondary
+     * For ideal transformer: i_s = n * i_p (current out of dotted secondary)
+     * This current enters s1 and flows out through the load to s2
+     */
     if (s1 > 0 && branch_ideal > 0) {
         MAT(solver, s1 - 1, branch_ideal - 1) += -n;
     }
-    if (s2 > 0 && branch_ideal > 0) {
-        MAT(solver, s2 - 1, branch_ideal - 1) += n;
+    if (s2_node > 0 && branch_ideal > 0) {
+        MAT(solver, s2_node - 1, branch_ideal - 1) += n;
     }
 
-    /* Constraint equation: V_m1 - V_m2 - n*(V_s1 - V_s2) = 0 */
+    /* Constraint equation: V_m1 - V_p2 - n*(V_s1 - V_s2) = 0 */
     if (branch_ideal > 0) {
         if (m1 > 0) MAT(solver, branch_ideal - 1, m1 - 1) += 1.0;
-        if (m2 > 0) MAT(solver, branch_ideal - 1, m2 - 1) += -1.0;
+        if (p2_node > 0) MAT(solver, branch_ideal - 1, p2_node - 1) += -1.0;
         if (s1 > 0) MAT(solver, branch_ideal - 1, s1 - 1) += -n;
-        if (s2 > 0) MAT(solver, branch_ideal - 1, s2 - 1) += n;
+        if (s2_node > 0) MAT(solver, branch_ideal - 1, s2_node - 1) += n;
     }
     
     /* ========================================================================
@@ -218,7 +238,7 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
          * But with saturation, we need to handle it carefully.
          * Use a large conductance for DC.
          */
-        mna_stamp_conductance(solver, m1, m2, MNA_MAX_CONDUCTANCE);
+        mna_stamp_conductance(solver, m1, p2_node, MNA_MAX_CONDUCTANCE);
     } else {
         /* Transient: nonlinear inductor companion model
          * i = i(flux), flux_dot = v
@@ -253,9 +273,10 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
             G_eq += 1.0 / xf->R_core;
         }
 
-        mna_stamp_conductance(solver, m1, m2, G_eq);
-        /* I_history flows from m1 to m2, stamp as current leaving m1 */
-        mna_stamp_current_source(solver, m1, m2, I_history);
+        /* Magnetizing branch is connected between m1 (internal primary) and p2 (primary return) */
+        mna_stamp_conductance(solver, m1, p2_node, G_eq);
+        /* I_history flows from m1 to p2, stamp as current leaving m1 */
+        mna_stamp_current_source(solver, m1, p2_node, I_history);
     }
 
     /* ========================================================================
@@ -264,17 +285,18 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
      *    This ensures inrush current flows through R1, providing damping.
      * ======================================================================== */
 
-    /* Primary series RL - now correctly between p1 and m1 */
+    /* Primary series RL: between p1 (external) and m1 (internal primary) */
     if (xf->R1 > 0 || xf->L1_leak > 0) {
         stamp_series_rl(solver, p1, m1, xf->R1, xf->L1_leak,
                        xf->i_mag_prev, dt, xf->branch_var_L1, is_dc);
     }
 
-    /* Secondary series RL - between s1 and s2 */
-    if (xf->R2 > 0 || xf->L2_leak > 0) {
-        stamp_series_rl(solver, s1, s2, xf->R2, xf->L2_leak,
-                       xf->i_mag_prev / n, dt, xf->branch_var_L2, is_dc);
-    }
+    /* Secondary series RL: NOT IMPLEMENTED
+     * The L2_leak should be in series with the ideal transformer secondary,
+     * but proper implementation requires a more complex topology.
+     * For now, L2_leak is ignored. Users can add external inductors if needed.
+     */
+    /* L2_leak stamping disabled */
 }
 
 /**
@@ -299,21 +321,21 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
                                    ComponentHandle* handle) {
     if (!solver) return MNA_INVALID_HANDLE;
     if (turns_ratio <= 0.0) return MNA_INVALID_PARAMETER;
-    
+
     MNAStatus status = mna_validate_nodes(solver, primary_p, primary_n);
     if (status != MNA_SUCCESS) return status;
     status = mna_validate_nodes(solver, secondary_p, secondary_n);
     if (status != MNA_SUCCESS) return status;
-    
+
     int new_count = solver->num_components + 1;
     if (!mna_resize_components(solver, new_count)) {
         return MNA_INSUFFICIENT_MEMORY;
     }
-    
+
     /* Allocate transformer structure */
     TransformerSat* xf = (TransformerSat*)calloc(1, sizeof(TransformerSat));
     if (!xf) return MNA_INSUFFICIENT_MEMORY;
-    
+
     xf->turns_ratio = turns_ratio;
     xf->R1 = 0.0;
     xf->R2 = 0.0;
@@ -335,7 +357,24 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
     xf->nodes[1] = primary_n;
     xf->nodes[2] = secondary_p;
     xf->nodes[3] = secondary_n;
-    xf->node_internal = 0;  /* Will be allocated if R1/L1 is used */
+
+    /* Always allocate internal nodes for the transformer model:
+     * - node_internal_pri: magnetizing node after primary series impedance
+     * - node_internal_sec: internal secondary node before secondary series impedance
+     * If R1/L1 are not present, node_internal_pri is shorted to p1.
+     * If R2/L2 are not present, node_internal_sec is shorted to s1.
+     */
+    xf->node_internal_pri = mna_create_node(solver);
+    if (xf->node_internal_pri <= 0) {
+        free(xf);
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+    
+    xf->node_internal_sec = mna_create_node(solver);
+    if (xf->node_internal_sec <= 0) {
+        free(xf);
+        return MNA_INSUFFICIENT_MEMORY;
+    }
 
     /* Allocate branch variables */
     /* branch_var_ideal: for ideal transformer constraint */
@@ -361,7 +400,7 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
 
     xf->branch_var_ideal = base_index;
     xf->branch_var_L1 = (xf->R1 > 1e-12 || xf->L1_leak > 1e-12) ? base_index + 1 : 0;
-    xf->branch_var_L2 = (xf->R2 > 1e-12 || xf->L2_leak > 1e-12) ? 
+    xf->branch_var_L2 = (xf->R2 > 1e-12 || xf->L2_leak > 1e-12) ?
                         (xf->branch_var_L1 ? base_index + 2 : base_index + 1) : 0;
 
     solver->num_sources += branch_count;
@@ -454,6 +493,13 @@ MNAStatus mna_transformer_sat_set_primary_leakage_inductance(TransformerSat* xf,
     if (!xf) return MNA_INVALID_HANDLE;
     if (inductance < 0) return MNA_INVALID_PARAMETER;
     xf->L1_leak = inductance;
+
+    /* Allocate internal node if not already allocated and we now have series impedance */
+    if ((xf->R1 > 1e-12 || xf->L1_leak > 1e-12) && xf->node_internal_pri <= 0) {
+        /* Note: Can't allocate node here - we don't have access to solver */
+        /* Node will be allocated lazily in stamp function or during init */
+    }
+    
     return MNA_SUCCESS;
 }
 
@@ -642,7 +688,7 @@ void mna_transformer_sat_init_state(Component* comp) {
         xf->i_mag_stage1 = 0.0;
         xf->v_prev = 0.0;
         xf->v_stage1 = 0.0;
-        xf->node_internal = 0;  /* Reset internal node for re-stamping */
+        /* Don't reset node_internal - it's allocated once and persists */
     }
 }
 
@@ -655,36 +701,19 @@ void mna_transformer_sat_update_state(Component* comp, double* solver_x, double 
     if (!xf || !npole || npole->num_nodes < 2) return;
     if (dt <= 0 || stage < 0) return;
 
-    /* Get primary terminal voltage */
-    double v_p = 0.0;
-    if (xf->nodes[0] > 0) v_p += solver_x[xf->nodes[0] - 1];
-    if (xf->nodes[1] > 0) v_p -= solver_x[xf->nodes[1] - 1];
-
-    /* Calculate voltage across magnetizing branch with R1/L1 damping.
-     * v_mag = v_p - R1*i_mag - L1*di_mag/dt
-     * Auto-compute R1 if not set but L1 is present.
+    /* Get voltage across magnetizing branch.
+     * The magnetizing branch is connected between node_internal_pri and primary_n (p2).
      */
-    double v_mag = v_p;
-    double R1_eff = xf->R1;
-    
-    if (R1_eff < 1e-12 && xf->L1_leak > 1e-12) {
-        /* Use high damping resistance to prevent flux accumulation.
-         * This compensates for the missing series impedance in the magnetizing path.
-         * The value is chosen to limit magnetizing current to reasonable levels.
-         */
-        R1_eff = 300.0;  /* Provides strong damping for inrush */
-    }
-    
-    if (R1_eff > 1e-12) {
-        /* Self-consistent voltage division: v_mag = v_p / (1 + R1 * G_eq) */
-        double L_inc = get_magnetizing_inductance(xf, xf->flux_linkage);
-        double gamma = MNA_TRBDF2_GAMMA;
-        double h1 = gamma * dt;
-        double G_eq = h1 / (2.0 * L_inc);
-        if (xf->R_core > 1e-6) G_eq += 1.0 / xf->R_core;
-        
-        double factor = 1.0 / (1.0 + R1_eff * G_eq);
-        v_mag = v_p * factor;
+    double v_mag = 0.0;
+
+    if (xf->node_internal_pri > 0) {
+        /* Get voltage at internal primary node */
+        if (xf->node_internal_pri > 0) v_mag += solver_x[xf->node_internal_pri - 1];
+        if (xf->nodes[1] > 0) v_mag -= solver_x[xf->nodes[1] - 1];
+    } else {
+        /* Fallback: use terminal voltage directly */
+        if (xf->nodes[0] > 0) v_mag += solver_x[xf->nodes[0] - 1];
+        if (xf->nodes[1] > 0) v_mag -= solver_x[xf->nodes[1] - 1];
     }
 
     /* Update flux linkage using trapezoidal integration */

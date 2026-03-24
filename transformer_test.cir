@@ -1,0 +1,14 @@
+* Transformer inrush test - mild inrush (~2x steady state)
+* V1 = 325*sin(2*pi*50*t), zero-crossing at t=0, 10ms, 20ms...
+* Switch at t=10ms to maximize inrush (voltage zero-crossing)
+V1 1 0 SIN(0 325 50)
+S1 1 2 0.001 0
+* Np=1400 gives B_peak=0.74T - well below saturation for mild inrush
+* Steady-state i_mag ≈ 0.15A, expecting inrush peak ≈ 0.3-0.4A
+.MODEL XFMR1 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 u_k=0.0 Acore=0.001 lpath=0.3 Np=1200 Bsat=1.8 Mur=1000 Rcore=2000 R1=10)
+TRSAT1 2 0 3 0 XFMR1
+Rload 3 0 100
+.ANALYSIS TRAN 50u 1
+.PRINT TRAN V(1) V(2) V(3) i_pri(XFMR1) I(Rload) i_mag(XFMR1)
+.WRITE transformer_test.csv
+.SWITCH_AT S1 10m 1
