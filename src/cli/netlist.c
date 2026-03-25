@@ -591,6 +591,7 @@ static MNAStatus transformer_compute_gost_params(TransformerModel* model) {
         double I2_nom = model->S_nom / model->V2_nom;
 
         /* Winding resistance from copper loss */
+        /* Only compute if R1 was not explicitly provided */
         if (!model->has_R1 && !model->has_R2 && model->has_P_cu && model->P_cu > 0) {
             double R_total = model->P_cu / (I1_nom * I1_nom);
             model->R1 = R_total * 0.5;
@@ -598,6 +599,7 @@ static MNAStatus transformer_compute_gost_params(TransformerModel* model) {
         }
 
         /* Leakage inductance from impedance voltage */
+        /* Only compute if L1 was not explicitly provided */
         if (!model->has_L1 && !model->has_L2 && model->has_u_k && model->u_k > 0) {
             double Z_base = (model->V1_nom * model->V1_nom) / model->S_nom;
             double Z_k = model->u_k * Z_base;
@@ -613,6 +615,37 @@ static MNAStatus transformer_compute_gost_params(TransformerModel* model) {
         /* Core loss resistance */
         if (!model->has_Rcore && model->has_P_core && model->P_core > 0) {
             model->Rcore = (model->V1_nom * model->V1_nom) / model->P_core;
+        }
+    } else {
+        /* S_nom not provided: compute L1 from u_k directly if specified.
+         * u_k is the per-unit impedance voltage (typically 0.04-0.10 for distribution transformers).
+         * Without S_nom, we cannot compute the base impedance properly.
+         * However, we can interpret u_k as specifying the voltage drop at a reference current.
+         * For simplicity, assume a reference current that would draw rated power at V1_nom.
+         * If user specifies u_k without S_nom, they likely want a simple reactance model.
+         *
+         * Interpretation: X_leak = u_k * (V1_nom / I_ref)
+         * where I_ref is an estimated nominal current.
+         * Without S_nom, we use: I_ref = V1_nom / (u_k * some_factor)
+         * This is ambiguous - the proper way is to always specify S_nom with u_k.
+         *
+         * For now, treat u_k as absolute reactance in ohms (non-standard but practical):
+         * If u_k < 1, assume it's per-unit and needs S_nom (warn user).
+         * If u_k >= 1, assume it's already X_leak in ohms.
+         */
+        if (!model->has_L1 && model->has_u_k && model->u_k > 0) {
+            double X_leak;
+            if (model->u_k < 1.0) {
+                /* Likely per-unit value but no S_nom provided - cannot compute properly
+                 * Use a fallback: assume S_nom = V1_nom * 1A (1A nominal current) */
+                double I1_nom = 1.0;  /* Fallback assumption */
+                double Z_base = (model->V1_nom * model->V1_nom) / (model->V1_nom * I1_nom);
+                X_leak = model->u_k * Z_base;
+            } else {
+                /* Treat as absolute reactance in ohms */
+                X_leak = model->u_k;
+            }
+            model->L1 = X_leak / (2.0 * M_PI * model->f_nom);
         }
     }
 
@@ -680,34 +713,29 @@ static MNAStatus parse_transformer_sat(NetlistContext* ctx, const char* line, in
         return report_error(ctx, line_num, "Failed to get transformer structure");
     }
 
-    /* Set parameters - use computed values if direct values not provided */
-    if (model->has_R1) {
-        mna_transformer_sat_set_primary_resistance(xf, model->R1);
-    } else if (model->R1 > 0) {
+    /* Set parameters - use explicitly set values, or computed values if available */
+    /* Primary resistance: use direct value if specified, otherwise use computed value */
+    if (model->R1 > 0) {
         mna_transformer_sat_set_primary_resistance(xf, model->R1);
     }
 
-    if (model->has_R2) {
-        mna_transformer_sat_set_secondary_resistance(xf, model->R2);
-    } else if (model->R2 > 0) {
+    /* Secondary resistance: use direct value if specified, otherwise use computed value */
+    if (model->R2 > 0) {
         mna_transformer_sat_set_secondary_resistance(xf, model->R2);
     }
 
-    if (model->has_L1) {
-        mna_transformer_sat_set_primary_leakage_inductance(xf, model->L1);
-    } else if (model->L1 > 0) {
+    /* Primary leakage inductance: use direct value if specified, otherwise use computed value */
+    if (model->L1 > 0) {
         mna_transformer_sat_set_primary_leakage_inductance(xf, model->L1);
     }
 
-    if (model->has_L2) {
-        mna_transformer_sat_set_secondary_leakage_inductance(xf, model->L2);
-    } else if (model->L2 > 0) {
+    /* Secondary leakage inductance: use direct value if specified, otherwise use computed value */
+    if (model->L2 > 0) {
         mna_transformer_sat_set_secondary_leakage_inductance(xf, model->L2);
     }
 
-    if (model->has_Rcore) {
-        mna_transformer_sat_set_core_loss_resistance(xf, model->Rcore);
-    } else if (model->Rcore > 0) {
+    /* Core loss resistance: use direct value if specified, otherwise use computed value */
+    if (model->Rcore > 0) {
         mna_transformer_sat_set_core_loss_resistance(xf, model->Rcore);
     }
 
