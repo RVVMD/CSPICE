@@ -259,13 +259,29 @@ static MNAStatus parse_voltage_source(NetlistContext* ctx, const char* line, int
         skip_whitespace(&p);
         if (*p == '(') p++;
 
+        /* SPICE SIN format: SIN(V0 Va freq Td Theta Phase)
+         * V0 = offset, Va = amplitude, freq = frequency
+         * Td = delay time, Theta = damping factor, Phase = phase shift (degrees)
+         * We only use V0, Va, freq, and Phase */
         double offset = parse_value(&p);
         double peak = parse_value(&p);
         double freq = parse_value(&p);
-        double phase = 0.0;
+        double td = 0.0;       /* Delay time - parsed but not used */
+        double theta = 0.0;    /* Damping factor - parsed but not used */
+        double phase = 0.0;    /* Phase shift in degrees */
+        
+        /* Parse optional parameters: Td, Theta, Phase */
         skip_whitespace(&p);
         if (*p && *p != ';' && *p != '\n' && *p != ')') {
-            phase = parse_value(&p);
+            td = parse_value(&p);
+            skip_whitespace(&p);
+            if (*p && *p != ';' && *p != '\n' && *p != ')') {
+                theta = parse_value(&p);
+                skip_whitespace(&p);
+                if (*p && *p != ';' && *p != '\n' && *p != ')') {
+                    phase = parse_value(&p);
+                }
+            }
         }
 
         value = offset;
@@ -287,6 +303,11 @@ static MNAStatus parse_voltage_source(NetlistContext* ctx, const char* line, int
         ctx->analysis.sin_freq = freq;
         ctx->analysis.sin_source_idx = handle;
         ctx->analysis.sin_source_valid = 1;
+        
+        /* Add to array of sine sources for multi-source support */
+        if (ctx->analysis.num_sin_sources < 16) {
+            ctx->analysis.sin_source_indices[ctx->analysis.num_sin_sources++] = handle;
+        }
 
         ctx->solver->components[handle].ac_magnitude = peak;
         ctx->solver->components[handle].ac_phase = phase * M_PI / 180.0;
@@ -1570,12 +1591,16 @@ MNAStatus netlist_run_analysis(NetlistContext* ctx) {
                 next_switch_event++;
             }
 
+            /* Update all sine sources for multi-source support */
             if (ctx->analysis.sin_source_valid && step > 0) {
                 double omega = 2.0 * M_PI * ctx->analysis.sin_freq;
-                double peak = ctx->solver->components[ctx->analysis.sin_source_idx].ac_magnitude;
-                double phase = ctx->solver->components[ctx->analysis.sin_source_idx].ac_phase;
-                double v_sin = peak * sin(omega * t + phase);
-                ctx->solver->components[ctx->analysis.sin_source_idx].value = v_sin;
+                for (int si = 0; si < ctx->analysis.num_sin_sources; si++) {
+                    int src_idx = ctx->analysis.sin_source_indices[si];
+                    double peak = ctx->solver->components[src_idx].ac_magnitude;
+                    double phase = ctx->solver->components[src_idx].ac_phase;
+                    double v_sin = peak * sin(omega * t + phase);
+                    ctx->solver->components[src_idx].value = v_sin;
+                }
             }
 
             if (step > 0) {

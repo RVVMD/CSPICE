@@ -1,0 +1,21 @@
+V1 1 0 SIN(0 325 50 0 0 0)
+V2 2 0 SIN(0 325 50 0 0 -120)
+V3 3 0 SIN(0 325 50 0 0 120)
+S1 1 4 4 0
+S2 2 5 4 0
+S3 3 6 4 0
+.MODEL XFMR1 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 u_k=0 Acore=0.001 lpath=0.3 Np=700 Bsat=3 Mur=100 Rcore=2000 R1=0.1)
+.MODEL XFMR2 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 u_k=0 Acore=0.001 lpath=0.3 Np=700 Bsat=3 Mur=100 Rcore=2000 R1=0.1)
+.MODEL XFMR3 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 u_k=0 Acore=0.001 lpath=0.3 Np=700 Bsat=3 Mur=100 Rcore=2000 R1=0.1)
+TRSAT1 4 0 7 0 XFMR1
+TRSAT2 5 0 8 0 XFMR2
+TRSAT3 6 0 9 0 XFMR3
+Rload1 7 0 100
+Rload2 8 0 100
+Rload3 9 0 100
+.ANALYSIS TRAN 50u 1
+.PRINT TRAN v(4) v(5) v(6) i_pri(XFMR1) i_pri(XFMR2) i_pri(XFMR3) i_mag(XFMR1) i_mag(XFMR2) i_mag(XFMR3)
+.WRITE transformer_test.csv
+.SWITCH_AT S1 8m 1
+.SWITCH_AT S2 8m 1
+.SWITCH_AT S3 8m 1

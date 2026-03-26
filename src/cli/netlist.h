@@ -122,8 +122,10 @@ typedef struct {
     double tran_end;
     int tran_enabled;
     double sin_freq;
-    int sin_source_idx;
+    int sin_source_idx;            /* Legacy: first sine source index */
     int sin_source_valid;
+    int sin_source_indices[16];    /* Array of sine source indices */
+    int num_sin_sources;           /* Number of sine sources */
     SwitchEvent switch_events[MNA_NETLIST_MAX_SWITCH_EVENTS];
     int num_switch_events;
 } AnalysisConfig;

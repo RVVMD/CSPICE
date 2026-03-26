@@ -40,6 +40,7 @@ struct TransformerSat {
     int branch_var_ideal;         /* Branch current for ideal transformer constraint */
     int branch_var_L1;            /* Branch current for primary leakage inductance */
     int branch_var_L2;            /* Branch current for secondary leakage inductance */
+    int component_index;          /* Component index for dynamic branch calculation */
 
     /* Terminal nodes */
     int nodes[4];                 /* p1, p2, s1, s2 (external terminals) */
@@ -50,6 +51,33 @@ struct TransformerSat {
 /* ============================================================================
  * Internal Helper Functions
  * ============================================================================ */
+
+/**
+ * Calculate branch index for transformer at stamping time.
+ * This matches how voltage sources calculate their indices.
+ *
+ * Each transformer has 1 branch: ideal constraint.
+ * L1 uses a companion model without a branch variable.
+ *
+ * Branch indices are assigned in component order:
+ * - Voltage sources: max_node_index + 0, max_node_index + 1, ...
+ * - Transformers: interleaved with voltage sources based on component order
+ */
+static int get_transformer_branch_index(const MNASolver* solver, int comp_idx) {
+    int branch_idx = solver->max_node_index;
+
+    /* Count all branches (voltage sources + transformers) before this component */
+    for (int i = 0; i < comp_idx; i++) {
+        const Component* comp = &solver->components[i];
+        if (comp->type == MNA_SOURCE && comp->source_type == SOURCE_VOLTAGE) {
+            branch_idx++;  /* Voltage source has 1 branch */
+        } else if (comp->type == MNA_CUSTOM_NPOLE) {
+            branch_idx += 1;  /* Transformer has 1 branch */
+        }
+    }
+
+    return branch_idx;
+}
 
 /**
  * Get magnetizing current from flux linkage using B-H curve
@@ -91,16 +119,9 @@ static void stamp_series_rl(MNASolver* solver, int n1, int n2,
                             double R, double L, double i_prev, double dt,
                             int branch_var, int is_dc) {
     if (is_dc) {
-        /* DC: inductor is short circuit */
-        if (L > 1e-12 && branch_var > 0) {
-            /* Stamp inductor as short with branch current */
-            if (n1 > 0) MAT(solver, n1 - 1, branch_var - 1) = 1.0;
-            if (n2 > 0) MAT(solver, n2 - 1, branch_var - 1) = -1.0;
-            if (branch_var > 0) {
-                if (n1 > 0) MAT(solver, branch_var - 1, n1 - 1) = 1.0;
-                if (n2 > 0) MAT(solver, branch_var - 1, n2 - 1) = -1.0;
-            }
-        } else if (R > 1e-12) {
+        /* DC: inductor is short, so total impedance is R */
+        /* Don't use branch variable - just stamp conductance */
+        if (R > 1e-12) {
             mna_stamp_conductance(solver, n1, n2, 1.0 / R);
         } else {
             mna_stamp_conductance(solver, n1, n2, MNA_MAX_CONDUCTANCE);
@@ -161,7 +182,7 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
 
     /* Internal nodes:
      * - node_internal_pri (m1): magnetizing node after primary series impedance
-     * 
+     *
      * Topology:
      *   p1 (ext) --[R1/L1]-- m1 (int) --[L_mag]-- p2 (ext)
      *                           |
@@ -193,34 +214,48 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
      *    Secondary leakage inductance must be added externally if needed.
      * ======================================================================== */
 
-    int branch_ideal = xf->branch_var_ideal;
+    /* Use dynamic branch index calculation for consistency with voltage sources */
+    int branch_ideal = get_transformer_branch_index(solver, xf->component_index);
 
-    /* Stamp B matrix for ideal transformer constraint */
-    /* Primary KCL: +i_ideal flows out of m1 (through ideal transformer) */
+    /* Stamp B matrix for ideal transformer constraint
+     * The branch current i_ideal is defined as flowing from p2 to m1 (primary).
+     * By dot convention: i_secondary = n * i_primary (current out of dotted secondary).
+     */
+    /* Primary KCL: +i_ideal flows into m1 from transformer */
     if (m1 > 0 && branch_ideal > 0) {
-        MAT(solver, m1 - 1, branch_ideal - 1) += 1.0;
+        MAT(solver, m1 - 1, branch_ideal) += 1.0;
     }
     if (p2_node > 0 && branch_ideal > 0) {
-        MAT(solver, p2_node - 1, branch_ideal - 1) += -1.0;
+        MAT(solver, p2_node - 1, branch_ideal) += -1.0;
     }
 
-    /* Secondary KCL: -n * i_ideal flows into s1 from ideal transformer secondary
+    /* Secondary KCL: -n * i_ideal flows out of s1 into transformer
      * For ideal transformer: i_s = n * i_p (current out of dotted secondary)
-     * This current enters s1 and flows out through the load to s2
+     * This current leaves node s1 into the transformer secondary.
      */
     if (s1 > 0 && branch_ideal > 0) {
-        MAT(solver, s1 - 1, branch_ideal - 1) += -n;
+        MAT(solver, s1 - 1, branch_ideal) += -n;
     }
     if (s2_node > 0 && branch_ideal > 0) {
-        MAT(solver, s2_node - 1, branch_ideal - 1) += n;
+        MAT(solver, s2_node - 1, branch_ideal) += n;
     }
 
     /* Constraint equation: V_m1 - V_p2 - n*(V_s1 - V_s2) = 0 */
     if (branch_ideal > 0) {
-        if (m1 > 0) MAT(solver, branch_ideal - 1, m1 - 1) += 1.0;
-        if (p2_node > 0) MAT(solver, branch_ideal - 1, p2_node - 1) += -1.0;
-        if (s1 > 0) MAT(solver, branch_ideal - 1, s1 - 1) += -n;
-        if (s2_node > 0) MAT(solver, branch_ideal - 1, s2_node - 1) += n;
+        if (m1 > 0) {
+            MAT(solver, branch_ideal, m1 - 1) += 1.0;
+        }
+        if (p2_node > 0) {
+            MAT(solver, branch_ideal, p2_node - 1) += -1.0;
+        }
+        if (s1 > 0) {
+            MAT(solver, branch_ideal, s1 - 1) += -n;
+        }
+        if (s2_node > 0) {
+            MAT(solver, branch_ideal, s2_node - 1) += n;
+        }
+        /* Add small diagonal term for numerical stability during LU factorization */
+        MAT(solver, branch_ideal, branch_ideal) += -1e-12;
     }
     
     /* ========================================================================
@@ -234,11 +269,23 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
     double v_prev = xf->v_prev;
 
     if (is_dc) {
-        /* DC: magnetizing branch is a short (inductor at steady state)
-         * But with saturation, we need to handle it carefully.
-         * Use a large conductance for DC.
+        /* DC: magnetizing branch modeling for transformer.
+         * At DC, the transformer core flux is constant, so there's no induced voltage
+         * across the magnetizing inductance. The magnetizing current is determined
+         * by the core's B-H curve and the residual flux.
+         *
+         * For DC operating point calculation, we model the magnetizing branch as
+         * a high resistance (representing the DC resistance of the magnetizing path)
+         * in parallel with the core loss resistance.
+         *
+         * Use a very small conductance to avoid singularity while allowing proper
+         * voltage transformation.
          */
-        mna_stamp_conductance(solver, m1, p2_node, MNA_MAX_CONDUCTANCE);
+        double G_mag = 1e-6;  /* Very high resistance for DC */
+        if (xf->R_core > 1e-6) {
+            G_mag += 1.0 / xf->R_core;
+        }
+        mna_stamp_conductance(solver, m1, p2_node, G_mag);
     } else {
         /* Transient: nonlinear inductor companion model
          * i = i(flux), flux_dot = v
@@ -283,12 +330,14 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
      * 3. Stamp series elements (leakage inductance and winding resistance)
      *    Primary series RL: between p1 (external) and m1 (internal)
      *    This ensures inrush current flows through R1, providing damping.
+     *    Note: Uses companion model without branch variable.
      * ======================================================================== */
 
     /* Primary series RL: between p1 (external) and m1 (internal primary) */
     if (xf->R1 > 0 || xf->L1_leak > 0) {
+        /* Use companion model without branch variable */
         stamp_series_rl(solver, p1, m1, xf->R1, xf->L1_leak,
-                       xf->i_mag_prev, dt, xf->branch_var_L1, is_dc);
+                       xf->i_mag_prev, dt, 0, is_dc);
     }
 
     /* Secondary series RL: NOT IMPLEMENTED
@@ -378,19 +427,15 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
 
     /* Allocate branch variables */
     /* branch_var_ideal: for ideal transformer constraint */
-    /* branch_var_L1: for primary leakage inductance (if used) */
+    /* branch_var_L1: for primary leakage inductance (if used) - ONLY for transient */
     /* branch_var_L2: for secondary leakage inductance (if used) */
 
     int base_index = solver->max_node_index + solver->num_sources + 1;
-    int branch_count = 1;  /* Always need branch for ideal transformer */
-
-    /* Allocate branch variable for series RL if used */
-    if (xf->R1 > 1e-12 || xf->L1_leak > 1e-12) {
-        branch_count++;
-    }
-    if (xf->R2 > 1e-12 || xf->L2_leak > 1e-12) {
-        branch_count++;
-    }
+    /* Only allocate 1 branch per transformer: for the ideal constraint.
+     * The L1 branch is NOT allocated because at DC it's not needed (inductor is short),
+     * and for transient we can use a companion model without a branch variable.
+     * This simplifies the MNA formulation and avoids singular matrices. */
+    int branch_count = 1;
 
     /* Resize matrix to accommodate branch variables */
     if (!mna_resize_matrix(solver, base_index + branch_count)) {
@@ -399,9 +444,8 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
     }
 
     xf->branch_var_ideal = base_index;
-    xf->branch_var_L1 = (xf->R1 > 1e-12 || xf->L1_leak > 1e-12) ? base_index + 1 : 0;
-    xf->branch_var_L2 = (xf->R2 > 1e-12 || xf->L2_leak > 1e-12) ?
-                        (xf->branch_var_L1 ? base_index + 2 : base_index + 1) : 0;
+    xf->branch_var_L1 = 0;  /* Not used - companion model doesn't need branch variable */
+    xf->branch_var_L2 = 0;  /* Not implemented */
 
     solver->num_sources += branch_count;
     
@@ -447,6 +491,10 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
     npole->branch_current_indices[0] = xf->branch_var_ideal;
     
     int index = solver->num_components++;
+
+    /* Store component index for dynamic branch calculation */
+    xf->component_index = index;
+
     solver->components[index] = comp;
     solver->num_nonlinear++;
     
@@ -587,14 +635,11 @@ double mna_transformer_sat_get_primary_current(MNASolver* solver, ComponentHandl
     TransformerSat* xf = (TransformerSat*)comp->data.npole.npole_data->user_data;
     if (!xf) return 0.0;
 
-    NPoleData* npole = comp->data.npole.npole_data;
-    if (!npole || npole->num_branch_currents < 1) return 0.0;
-
-    /* Primary current = ideal transformer branch current + magnetizing current */
-    int idx = npole->branch_current_indices[0];
+    /* Use dynamic branch index calculation (0-indexed) */
+    int idx = get_transformer_branch_index(solver, xf->component_index);
     if (idx <= 0) return 0.0;
 
-    double i_ideal = solver->x[idx - 1];
+    double i_ideal = solver->x[idx];
     return i_ideal + xf->magnetizing_current;
 }
 
@@ -607,14 +652,11 @@ double mna_transformer_sat_get_secondary_current(MNASolver* solver, ComponentHan
     TransformerSat* xf = (TransformerSat*)comp->data.npole.npole_data->user_data;
     if (!xf) return 0.0;
 
-    NPoleData* npole = comp->data.npole.npole_data;
-    if (!npole || npole->num_branch_currents < 1) return 0.0;
-
-    /* Get ideal transformer branch current (before adding magnetizing current) */
-    int idx = npole->branch_current_indices[0];
+    /* Use dynamic branch index calculation (0-indexed) */
+    int idx = get_transformer_branch_index(solver, xf->component_index);
     if (idx <= 0) return 0.0;
 
-    double i_ideal = solver->x[idx - 1];
+    double i_ideal = solver->x[idx];
 
     /* Secondary current: i_s = n * i_p_ideal (current scales with turns ratio)
      * For step-down (n > 1), secondary current is LARGER than primary

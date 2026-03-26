@@ -83,6 +83,9 @@ void mna_stamp_voltage_source(MNASolver* solver, int comp_index, int source_idx)
         MAT(solver, v_index, n2-1) = -1.0;
     }
     solver->b[v_index] = vs->value;
+    
+    /* Add small diagonal term for numerical stability during LU factorization */
+    MAT(solver, v_index, v_index) += -1e-12;
 }
 
 void mna_ensure_ground_paths(MNASolver* solver) {
