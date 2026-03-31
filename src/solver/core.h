@@ -20,10 +20,10 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
 
 MNAStatus mna_validate_nodes(MNASolver* solver, int node1, int node2);
 
-double mna_get_node_voltage(MNASolver* solver, int node);
-double complex mna_get_ac_node_voltage(MNASolver* solver, int node);
-double mna_get_component_current(MNASolver* solver, ComponentHandle handle);
-double mna_get_component_voltage(MNASolver* solver, ComponentHandle handle);
+double mna_get_node_voltage(const MNASolver* solver, int node);
+double complex mna_get_ac_node_voltage(const MNASolver* solver, int node);
+double mna_get_component_current(const MNASolver* solver, ComponentHandle handle);
+double mna_get_component_voltage(const MNASolver* solver, ComponentHandle handle);
 
 #ifdef __cplusplus
 }

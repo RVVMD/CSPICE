@@ -55,6 +55,9 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
                                 NPoleStampFunc stamp_func, void* user_data,
                                 int num_branch_currents, ComponentHandle* handle) {
     if (!solver) return MNA_INVALID_HANDLE;
+    if (num_nodes < 0 || (num_nodes > 0 && nodes == NULL)) {
+        return MNA_INVALID_PARAMETER;
+    }
 
     for (int i = 0; i < num_nodes; i++) {
         if (nodes[i] < 0 || nodes[i] > solver->max_node_index) {
@@ -67,6 +70,7 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
         return MNA_INSUFFICIENT_MEMORY;
     }
 
+    int sources_before = solver->num_sources;
     if (num_branch_currents > 0) {
         if (!mna_resize_matrix(solver, solver->max_node_index + solver->num_sources + num_branch_currents)) {
             return MNA_INSUFFICIENT_MEMORY;
@@ -82,11 +86,18 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
     comp.is_nonlinear = true;
 
     comp.data.npole.npole_data = (NPoleData*)malloc(sizeof(NPoleData));
-    if (!comp.data.npole.npole_data) return MNA_INSUFFICIENT_MEMORY;
+    if (!comp.data.npole.npole_data) {
+        if (num_branch_currents > 0) solver->num_sources = sources_before;
+        return MNA_INSUFFICIENT_MEMORY;
+    }
+    comp.data.npole.npole_data->nodes = NULL;
+    comp.data.npole.npole_data->last_values = NULL;
+    comp.data.npole.npole_data->branch_current_indices = NULL;
 
     comp.data.npole.npole_data->nodes = (int*)malloc((size_t)num_nodes * sizeof(int));
     if (!comp.data.npole.npole_data->nodes) {
         free(comp.data.npole.npole_data);
+        if (num_branch_currents > 0) solver->num_sources = sources_before;
         return MNA_INSUFFICIENT_MEMORY;
     }
 
@@ -94,6 +105,7 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
     if (!comp.data.npole.npole_data->last_values) {
         free(comp.data.npole.npole_data->nodes);
         free(comp.data.npole.npole_data);
+        if (num_branch_currents > 0) solver->num_sources = sources_before;
         return MNA_INSUFFICIENT_MEMORY;
     }
 
@@ -105,11 +117,12 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
             free(comp.data.npole.npole_data->last_values);
             free(comp.data.npole.npole_data->nodes);
             free(comp.data.npole.npole_data);
+            if (num_branch_currents > 0) solver->num_sources = sources_before;
             return MNA_INSUFFICIENT_MEMORY;
         }
         for (int i = 0; i < num_branch_currents; i++) {
             comp.data.npole.npole_data->branch_current_indices[i] =
-                solver->max_node_index + solver->num_sources - num_branch_currents + i;
+                solver->max_node_index + sources_before + i;
         }
     } else {
         comp.data.npole.npole_data->branch_current_indices = NULL;
@@ -119,6 +132,8 @@ MNAStatus mna_add_custom_n_pole(MNASolver* solver, const int* nodes, int num_nod
     comp.data.npole.npole_data->num_nodes = num_nodes;
     comp.data.npole.npole_data->stamp_func = stamp_func;
     comp.data.npole.npole_data->user_data = user_data;
+
+    comp.smoothed_alpha = 1.0;  /* Initialize damping factor */
 
     int index = solver->num_components++;
     solver->components[index] = comp;

@@ -19,7 +19,9 @@ MNAStatus mna_solve_ac(MNASolver* solver, double frequency) {
                                          sizeof(double complex));
 
     if (!A_complex || !b_complex || !x_complex) {
-        free(A_complex); free(b_complex); free(x_complex);
+        free(A_complex);
+        free(b_complex);
+        free(x_complex);
         return MNA_INSUFFICIENT_MEMORY;
     }
 

@@ -353,7 +353,7 @@ MNAStatus mna_solve_transient_step(MNASolver* solver, double dt) {
     return MNA_SUCCESS;
 }
 
-double mna_get_time(MNASolver* solver) {
+double mna_get_time(const MNASolver* solver) {
     if (!solver) return 0.0;
     return solver->time;
 }

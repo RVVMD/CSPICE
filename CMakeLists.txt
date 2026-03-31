@@ -96,18 +96,38 @@ set_target_properties(cspice PROPERTIES
 # =============================================================================
 # Test Programs
 # =============================================================================
-# Disabled: test_transformer_csv.c not present
-# add_executable(test_transformer test_transformer_csv.c)
-# target_include_directories(test_transformer PRIVATE
-#     ${CMAKE_CURRENT_SOURCE_DIR}
-#     ${CMAKE_CURRENT_SOURCE_DIR}/include
-#     ${CMAKE_CURRENT_SOURCE_DIR}/elements
-#     ${CMAKE_CURRENT_SOURCE_DIR}/src
-# )
-# target_link_libraries(test_transformer PRIVATE mna_solver_shared ${MATH_LIBRARY})
-# set_target_properties(test_transformer PROPERTIES
-#     RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
-# )
+option(BUILD_TESTS "Build unit tests" ON)
+
+if(BUILD_TESTS)
+    # Test sources
+    set(TEST_SOURCES
+        tests/test_main.c
+        tests/test_passive.c
+        tests/test_transformer.c
+        tests/test_sources.c
+        tests/test_validation.c
+        tests/test_netlist.c
+        tests/test_transformer_comprehensive.c
+        tests/test_saturated_transformer_realistic.c
+    )
+    
+    add_executable(cspice_tests ${TEST_SOURCES})
+    target_include_directories(cspice_tests PRIVATE
+        ${CMAKE_CURRENT_SOURCE_DIR}
+        ${CMAKE_CURRENT_SOURCE_DIR}/include
+        ${CMAKE_CURRENT_SOURCE_DIR}/elements
+        ${CMAKE_CURRENT_SOURCE_DIR}/src
+        ${CMAKE_CURRENT_SOURCE_DIR}/tests
+    )
+    target_link_libraries(cspice_tests PRIVATE mna_solver_shared ${MATH_LIBRARY})
+    set_target_properties(cspice_tests PROPERTIES
+        RUNTIME_OUTPUT_DIRECTORY ${CMAKE_BINARY_DIR}/bin
+    )
+    
+    # Enable testing
+    enable_testing()
+    add_test(NAME cspice_tests COMMAND ${CMAKE_BINARY_DIR}/bin/cspice_tests)
+endif()
 
 # =============================================================================
 # Installation

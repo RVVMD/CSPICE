@@ -8,24 +8,28 @@ MNAStatus mna_validate_nodes(MNASolver* solver, int node1, int node2);
 
 MNAStatus mna_add_resistor(MNASolver* solver, int node1, int node2,
                            double value, ComponentHandle* handle) {
+    if (value <= 0.0) return MNA_INVALID_PARAMETER;
     return mna_add_component(solver, MNA_RESISTOR, node1, node2, value,
                              SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_capacitor(MNASolver* solver, int node1, int node2,
                             double value, ComponentHandle* handle) {
+    if (value <= 0.0) return MNA_INVALID_PARAMETER;
     return mna_add_component(solver, MNA_CAPACITOR, node1, node2, value,
                              SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_inductor(MNASolver* solver, int node1, int node2,
                            double value, ComponentHandle* handle) {
+    if (value <= 0.0) return MNA_INVALID_PARAMETER;
     return mna_add_component(solver, MNA_INDUCTOR, node1, node2, value,
                              SOURCE_CURRENT, handle);
 }
 
 MNAStatus mna_add_switch(MNASolver* solver, int node1, int node2,
                          double value, ComponentHandle* handle) {
+    if (value <= 0.0) return MNA_INVALID_PARAMETER;
     return mna_add_component(solver, MNA_SWITCH, node1, node2, value,
                              SOURCE_CURRENT, handle);
 }

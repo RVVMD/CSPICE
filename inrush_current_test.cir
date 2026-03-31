@@ -1,0 +1,59 @@
+* Transformer Inrush Current Simulation
+* Demonstrates core saturation effects during energization
+*
+* Circuit: 230V/230V, 1kVA single-phase transformer
+* Switch closes at t=10ms to simulate transformer energization
+*
+* Inrush current occurs when transformer is energized at voltage zero-crossing,
+* causing core saturation and peak currents up to 10x nominal current.
+
+* Primary voltage source: 230V RMS (325V peak), 50Hz
+V1 1 0 SIN(0 325 50)
+
+* Switch to control energization timing
+* Closed resistance: 0.001 ohm, Open resistance: 1e6 ohm
+S1 1 2 0.001 1e6
+
+* Realistic single-phase transformer model with saturation
+* Parameters for 230V/230V, 1kVA, 50Hz transformer:
+*   - V1_nom, V2_nom: Rated voltages
+*   - f_nom: Rated frequency
+*   - S_nom: Apparent power rating
+*   - Acore: Core cross-section area [m^2]
+*   - lpath: Magnetic path length [m]
+*   - Np: Primary turns
+*   - Bsat: Saturation flux density [T] (silicon steel ~1.5-1.8T)
+*   - Mur: Relative permeability (grain-oriented steel ~1000-5000)
+*   - Rcore: Core loss resistance [ohm]
+*   - R1: Primary winding resistance [ohm]
+*   - u_k: Leakage impedance [%]
+.MODEL XFMR1 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 Acore=0.0012 lpath=0.35 Np=650 Bsat=1.6 Mur=3000 Rcore=5000 R1=0.5 u_k=0.05)
+
+* Transformer under test
+* Primary: nodes 2-0, Secondary: nodes 3-0
+TRSAT1 2 0 3 0 XFMR1
+
+* Secondary load (open circuit for inrush measurement)
+* Use high resistance to approximate no-load condition
+Rload 3 0 10000
+
+* Analysis: transient for 100ms (5 cycles at 50Hz)
+* Time step: 50us for accurate inrush capture
+.ANALYSIS TRAN 50u 0.1
+
+* Output variables to capture:
+*   V(1): Source voltage
+*   V(2): Primary terminal voltage (after switch)
+*   V(3): Secondary voltage
+*   i_pri(TRSAT1): Primary current (includes inrush)
+*   i_mag(TRSAT1): Magnetizing current (shows saturation)
+*   flux(TRSAT1): Core flux linkage [Wb]
+*   B(TRSAT1): Magnetic flux density [T]
+.PRINT TRAN V(1) V(2) V(3) i_pri(TRSAT1) i_mag(TRSAT1) flux(TRSAT1) B(TRSAT1)
+
+* Write results to CSV file for analysis
+.WRITE inrush_current_test.csv
+
+* Close switch at t=10ms (near voltage zero-crossing for maximum inrush)
+* This timing maximizes the DC offset in flux, causing saturation
+.SWITCH_AT S1 10m 1

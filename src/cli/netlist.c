@@ -568,8 +568,10 @@ static MNAStatus parse_transformer_ideal(NetlistContext* ctx, const char* line, 
     int node1, node2, node3, node4;
     double turns_ratio;
     ComponentHandle handle;
-    const char* p = line + 1;
+    /* Don't skip any characters - the name includes the TR prefix */
+    const char* p = line;
 
+    /* Parse the full component name (e.g., "TR1") */
     parse_token(&p, name, sizeof(name));
     parse_token(&p, token, sizeof(token));
     node1 = atoi(token);
@@ -677,8 +679,10 @@ static MNAStatus parse_transformer_sat(NetlistContext* ctx, const char* line, in
     char name[MNA_NETLIST_MAX_NAME], token[64], model_name[MNA_NETLIST_MAX_NAME];
     int node1, node2, node3, node4;
     ComponentHandle handle;
-    const char* p = line + 1;
+    /* Don't skip any characters - the name includes the TRSAT prefix */
+    const char* p = line;
 
+    /* Parse the full component name (e.g., "TRSAT1") */
     parse_token(&p, name, sizeof(name));
     parse_token(&p, token, sizeof(token));
     node1 = atoi(token);

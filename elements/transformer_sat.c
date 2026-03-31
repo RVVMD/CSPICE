@@ -54,29 +54,40 @@ struct TransformerSat {
 
 /**
  * Calculate branch index for transformer at stamping time.
- * This matches how voltage sources calculate their indices.
+ * 
+ * Branch variables are organized as:
+ * - Nodes: 0 to max_node_index-1
+ * - Voltage sources: max_node_index to max_node_index+num_vs-1 (assigned during stamping)
+ * - Transformers: max_node_index+num_vs to max_node_index+num_vs+num_xfmr-1
  *
- * Each transformer has 1 branch: ideal constraint.
- * L1 uses a companion model without a branch variable.
- *
- * Branch indices are assigned in component order:
- * - Voltage sources: max_node_index + 0, max_node_index + 1, ...
- * - Transformers: interleaved with voltage sources based on component order
+ * This function returns the transformer's branch index, which comes after all
+ * voltage source branches. The transformer's position among transformers determines
+ * its offset.
  */
 static int get_transformer_branch_index(const MNASolver* solver, int comp_idx) {
-    int branch_idx = solver->max_node_index;
-
-    /* Count all branches (voltage sources + transformers) before this component */
-    for (int i = 0; i < comp_idx; i++) {
+    /* Count total voltage sources in the system */
+    int total_vs = 0;
+    for (int i = 0; i < solver->num_components; i++) {
         const Component* comp = &solver->components[i];
         if (comp->type == MNA_SOURCE && comp->source_type == SOURCE_VOLTAGE) {
-            branch_idx++;  /* Voltage source has 1 branch */
-        } else if (comp->type == MNA_CUSTOM_NPOLE) {
-            branch_idx += 1;  /* Transformer has 1 branch */
+            total_vs++;
         }
     }
-
-    return branch_idx;
+    
+    /* Count transformers before this component to get this transformer's index */
+    int xfmr_index = 0;
+    for (int i = 0; i < comp_idx; i++) {
+        const Component* comp = &solver->components[i];
+        if (comp->type == MNA_CUSTOM_NPOLE) {
+            NPoleData* npole = comp->data.npole.npole_data;
+            if (npole && npole->branch_current_indices) {
+                xfmr_index++;
+            }
+        }
+    }
+    
+    /* Transformer branch indices start after all voltage source branches */
+    return solver->max_node_index + total_vs + xfmr_index;
 }
 
 /**
@@ -255,7 +266,7 @@ static void mna_stamp_transformer_sat(MNASolver* solver,
             MAT(solver, branch_ideal, s2_node - 1) += n;
         }
         /* Add small diagonal term for numerical stability during LU factorization */
-        MAT(solver, branch_ideal, branch_ideal) += -1e-12;
+        MAT(solver, branch_ideal, branch_ideal) += MNA_MATRIX_DIAG_PERTURBATION;
     }
     
     /* ========================================================================
@@ -369,7 +380,7 @@ MNAStatus mna_add_transformer_sat(MNASolver* solver,
                                    double turns_ratio,
                                    ComponentHandle* handle) {
     if (!solver) return MNA_INVALID_HANDLE;
-    if (turns_ratio <= 0.0) return MNA_INVALID_PARAMETER;
+    if (turns_ratio <= 0.0 || turns_ratio > 1e9) return MNA_INVALID_PARAMETER;
 
     MNAStatus status = mna_validate_nodes(solver, primary_p, primary_n);
     if (status != MNA_SUCCESS) return status;

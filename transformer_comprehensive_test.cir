@@ -1,0 +1,30 @@
+* Comprehensive Transformer Test Circuit
+* Tests realistic transformer parameters in various operating modes
+
+* Primary voltage source: 230V RMS, 50Hz
+V1 1 0 SIN(0 325 50)
+
+* Switch to control energization timing
+S1 1 2 0.001 0
+
+* Realistic single-phase transformer model
+* 230V/230V, 1kVA, 50Hz transformer
+.MODEL XFMR1 TRSAT (V1_nom=230 V2_nom=230 f_nom=50 S_nom=1000 Acore=0.001 lpath=0.3 Np=700 Bsat=1.5 Mur=1000 Rcore=2000 R1=0.1 u_k=0.05)
+
+* Transformer under test
+TRSAT1 2 0 3 0 XFMR1
+
+* Load resistor
+Rload 3 0 100
+
+* Analysis: transient for 1 second
+.ANALYSIS TRAN 50u 1
+
+* Print key variables
+.PRINT TRAN V(1) V(2) V(3) i_pri(TRSAT1) i_sec(TRSAT1) i_mag(TRSAT1)
+
+* Write results to CSV
+.WRITE transformer_comprehensive_test.csv
+
+* Switch at 10ms to simulate controlled energization
+.SWITCH_AT S1 10m 1

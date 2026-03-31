@@ -22,6 +22,8 @@
 #define MNA_DAMPING_STEEPNESS  1e3
 #define MNA_V_FLOOR            1e-9
 #define MNA_I_FLOOR            1e-9
+/* Matrix stability diagonal perturbation for voltage source rows */
+#define MNA_MATRIX_DIAG_PERTURBATION  -1e-12
 
 typedef enum {
     MNA_SUCCESS,

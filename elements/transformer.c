@@ -83,7 +83,7 @@ MNAStatus mna_add_ideal_transformer(MNASolver* solver,
                                     double turns_ratio,
                                     ComponentHandle* handle) {
     if (!solver) return MNA_INVALID_HANDLE;
-    if (turns_ratio <= 0.0) return MNA_INVALID_PARAMETER;
+    if (turns_ratio <= 0.0 || turns_ratio > 1e9) return MNA_INVALID_PARAMETER;
 
     MNAStatus status = mna_validate_nodes(solver, primary_p, primary_n);
     if (status != MNA_SUCCESS) return status;

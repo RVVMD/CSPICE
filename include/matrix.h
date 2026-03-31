@@ -7,7 +7,7 @@
 extern "C" {
 #endif
 
-#define MAT(solver, i, j) ((solver)->A[(i) * (solver)->matrix_cap_size + (j)])
+#define MAT(solver, i, j) ((solver)->A[(size_t)(i) * (size_t)(solver)->matrix_cap_size + (size_t)(j)])
 
 bool mna_resize_components(MNASolver* solver, int required);
 bool mna_resize_matrix(MNASolver* solver, int req_size);

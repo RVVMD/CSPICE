@@ -9,7 +9,7 @@ extern "C" {
 
 void mna_init_transient(MNASolver* solver);
 MNAStatus mna_solve_transient_step(MNASolver* solver, double dt);
-double mna_get_time(MNASolver* solver);
+double mna_get_time(const MNASolver* solver);
 
 #ifdef __cplusplus
 }

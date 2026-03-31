@@ -31,15 +31,30 @@ void mna_destroy(MNASolver* solver) {
 
     for (int i = 0; i < solver->num_components; i++) {
         Component* comp = &solver->components[i];
+
         if (comp->type == MNA_CUSTOM_NPOLE && comp->data.npole.npole_data) {
-            /* Call cleanup for transformer_sat if applicable */
-            mna_transformer_sat_cleanup(comp);
-            
             NPoleData* npole = comp->data.npole.npole_data;
+
+            /* Determine if this is a saturated transformer or ideal transformer
+             * Ideal transformers have value > 0 (turns ratio) and num_branch_currents == 0
+             * Saturated transformers have value == 0 and num_branch_currents > 0
+             */
+            if (comp->value > 0.0 && npole->num_branch_currents == 0) {
+                /* Ideal transformer - free TransformerData */
+                free(npole->user_data);
+            } else {
+                /* Saturated transformer or other N-pole - call appropriate cleanup */
+                mna_transformer_sat_cleanup(comp);
+            }
+
+            /* Free NPoleData common fields */
             free(npole->nodes);
             free(npole->last_values);
             free(npole->branch_current_indices);
             free(npole);
+        } else if (comp->type == MNA_CUSTOM_NONLINEAR && comp->user_data != NULL) {
+            /* Free user_data for custom nonlinear components (e.g., diode params) */
+            free(comp->user_data);
         }
     }
 
@@ -69,6 +84,7 @@ int mna_create_node(MNASolver* solver) {
 
     int new_index = solver->max_node_index + 1;
     if (!mna_resize_matrix(solver, new_index + solver->num_sources)) {
+        /* Resize failed - likely out of memory */
         return -1;
     }
 
@@ -92,6 +108,12 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
 
     MNAStatus status = mna_validate_nodes(solver, node1, node2);
     if (status != MNA_SUCCESS) return status;
+
+    /* Validate component values based on type */
+    if (type == MNA_RESISTOR || type == MNA_CAPACITOR || type == MNA_INDUCTOR ||
+        type == MNA_SWITCH) {
+        if (value <= 0.0) return MNA_INVALID_PARAMETER;
+    }
 
     int new_count = solver->num_components + 1;
     if (!mna_resize_components(solver, new_count)) {
@@ -122,20 +144,20 @@ MNAStatus mna_add_component(MNASolver* solver, ComponentType type, int node1, in
     return MNA_SUCCESS;
 }
 
-double mna_get_node_voltage(MNASolver* solver, int node) {
+double mna_get_node_voltage(const MNASolver* solver, int node) {
     if (!solver || node <= 0 || node > solver->max_node_index) return 0.0;
     return solver->x[node-1];
 }
 
-double complex mna_get_ac_node_voltage(MNASolver* solver, int node) {
+double complex mna_get_ac_node_voltage(const MNASolver* solver, int node) {
     if (!solver || node <= 0 || node > solver->max_node_index) return 0.0;
     return solver->ac_solution[node-1];
 }
 
-double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
+double mna_get_component_current(const MNASolver* solver, ComponentHandle handle) {
     if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
 
-    Component* comp = &solver->components[handle];
+    const Component* comp = &solver->components[handle];
     int n1 = comp->node1;
     int n2 = comp->node2;
     double v1 = (n1 > 0) ? mna_get_node_voltage(solver, n1) : 0.0;
@@ -183,18 +205,28 @@ double mna_get_component_current(MNASolver* solver, ComponentHandle handle) {
             return current;
         }
 
-        case MNA_CUSTOM_NPOLE:
+        case MNA_CUSTOM_NPOLE: {
+            /* Extract branch current from N-pole data */
+            const NPoleData* npole = comp->data.npole.npole_data;
+            if (npole && npole->num_branch_currents > 0 &&
+                npole->branch_current_indices != NULL) {
+                int idx = npole->branch_current_indices[0];
+                if (idx > 0 && idx <= mna_active_size(solver)) {
+                    return solver->x[idx - 1];
+                }
+            }
             return 0.0;
+        }
 
         default:
             return 0.0;
     }
 }
 
-double mna_get_component_voltage(MNASolver* solver, ComponentHandle handle) {
+double mna_get_component_voltage(const MNASolver* solver, ComponentHandle handle) {
     if (!solver || handle < 0 || handle >= solver->num_components) return 0.0;
 
-    Component* comp = &solver->components[handle];
+    const Component* comp = &solver->components[handle];
     int n1 = comp->node1;
     int n2 = comp->node2;
     double v1 = (n1 > 0) ? mna_get_node_voltage(solver, n1) : 0.0;

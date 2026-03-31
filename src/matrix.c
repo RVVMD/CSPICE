@@ -33,19 +33,28 @@ bool mna_resize_matrix(MNASolver* s, int req_size) {
     double* x2 = (double*)calloc(vec_elems, sizeof(double));
     double complex* ac2 = (double complex*)calloc(vec_elems, sizeof(double complex));
     if (!A2 || !b2 || !x2 || !ac2) {
-        free(A2); free(b2); free(x2); free(ac2);
+        free(A2);
+        free(b2);
+        free(x2);
+        free(ac2);
         return false;
     }
     int old_size = s->matrix_cap_size;
-    if (s->A && old_size > 0) {
+    if (s->A != NULL && s->b != NULL && s->x != NULL && s->ac_solution != NULL && old_size > 0) {
         for (int i = 0; i < old_size; ++i) {
-            memcpy(A2 + (size_t)i * new_size, s->A + (size_t)i * old_size, (size_t)old_size * sizeof(double));
+            memcpy(A2 + (size_t)i * (size_t)new_size,
+                   s->A + (size_t)i * (size_t)old_size,
+                   (size_t)old_size * sizeof(double));
         }
         memcpy(b2, s->b, (size_t)old_size * sizeof(double));
         memcpy(x2, s->x, (size_t)old_size * sizeof(double));
         memcpy(ac2, s->ac_solution, (size_t)old_size * sizeof(double complex));
     }
-    free(s->A); free(s->b); free(s->x); free(s->ac_solution);
+    /* Only free old pointers after successful copy */
+    free(s->A);
+    free(s->b);
+    free(s->x);
+    free(s->ac_solution);
     s->A = A2;
     s->b = b2;
     s->x = x2;
@@ -83,9 +92,9 @@ void mna_stamp_voltage_source(MNASolver* solver, int comp_index, int source_idx)
         MAT(solver, v_index, n2-1) = -1.0;
     }
     solver->b[v_index] = vs->value;
-    
+
     /* Add small diagonal term for numerical stability during LU factorization */
-    MAT(solver, v_index, v_index) += -1e-12;
+    MAT(solver, v_index, v_index) += MNA_MATRIX_DIAG_PERTURBATION;
 }
 
 void mna_ensure_ground_paths(MNASolver* solver) {
